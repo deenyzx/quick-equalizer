@@ -6,10 +6,16 @@ const BANDS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 const LABELS = ["32", "64", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
 
 const PRESETS = {
-  flat:    { label: "Flat",       values: [0,0,0,0,0,0,0,0,0,0] },
-  esport:  { label: "Esport / CS",values: [-2,0,0,2,5,5,4,3,2,1] },
-  music:   { label: "Music",      values: [3,2,1,0,-1,0,1,2,2,1] },
-  podcast: { label: "Podcast",    values: [-2,-2,0,3,4,3,2,0,-1,-2] },
+  flat:     { label: "Flat",     values: [ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0] },
+  cs2:      { label: "CS2",      values: [-4, -2,  5,  6,  5,  2, -3,  6,  1, -3] },
+  valorant: { label: "Valorant", values: [-4, -2,  4,  5,  4,  5, -2,  6,  4, -2] },
+  r6s:      { label: "R6S",      values: [-5, -2,  6,  7,  6,  3, -4,  4,  2, -4] },
+  pubg:     { label: "PUBG",     values: [-3,  2,  5,  6,  4,  2, -2,  3,  3, -1] },
+  league:   { label: "League",   values: [-6, -4, -2,  0,  4,  6,  3,  5,  4,  1] },
+  fortnite: { label: "Fortnite", values: [-4, -1,  4,  5,  3,  3, -3,  5,  4,  0] },
+  esport:   { label: "Esport",   values: [-4, -2,  3,  5,  5,  4, -2,  5,  2, -2] },
+  music:    { label: "Music",    values: [ 3,  2,  1,  0, -1,  0,  1,  2,  2,  1] },
+  podcast:  { label: "Podcast",  values: [-2, -2,  0,  3,  4,  3,  2,  0, -1, -2] },
 };
 
 const ACCENT = "#e8441a";
@@ -33,7 +39,7 @@ export default function App() {
   valsRef.current = vals;
   draggingRef.current = dragging;
 
-  // On mount: detect APO device
+  // On mount: detect APO device and load saved presets
   useEffect(() => {
     invoke("get_apo_device")
       .then((device) => {
@@ -44,6 +50,15 @@ export default function App() {
         setActiveDevice("APO not detected");
         setApoFound(false);
       });
+
+    invoke("load_presets")
+      .then((json) => {
+        const saved = JSON.parse(json);
+        if (Object.keys(saved).length > 0) {
+          setCustomPresets(saved);
+        }
+      })
+      .catch(console.error);
   }, []);
 
   // Write config whenever vals, preamp, or eqOn changes
@@ -76,7 +91,6 @@ export default function App() {
     ctx.clearRect(0, 0, W, H);
     ctx.globalAlpha = eqOn ? 1 : 0.3;
 
-    // Grid lines
     ctx.strokeStyle = "rgba(255,255,255,0.05)";
     ctx.lineWidth = 0.5;
     [-12, -6, 0, 6, 12].forEach((db) => {
@@ -101,7 +115,6 @@ export default function App() {
     const currentVals = valsRef.current;
     const pts = currentVals.map((_, i) => [bX(i), bY(currentVals[i])]);
 
-    // Fill under curve
     ctx.beginPath();
     ctx.moveTo(pts[0][0], pts[0][1]);
     for (let i = 0; i < pts.length - 1; i++) {
@@ -114,7 +127,6 @@ export default function App() {
     grad.addColorStop(1, "rgba(232,68,26,0.01)");
     ctx.fillStyle = grad; ctx.fill();
 
-    // Curve line
     ctx.beginPath();
     ctx.moveTo(pts[0][0], pts[0][1]);
     for (let i = 0; i < pts.length - 1; i++) {
@@ -123,7 +135,6 @@ export default function App() {
     }
     ctx.strokeStyle = ACCENT; ctx.lineWidth = 2; ctx.stroke();
 
-    // Band dots
     currentVals.forEach((v, i) => {
       const x = bX(i), y = bY(v);
       const hot = draggingRef.current === i;
@@ -147,7 +158,6 @@ export default function App() {
 
   useEffect(() => { draw(); }, [vals, eqOn, draw]);
 
-  // Canvas resize
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -167,7 +177,6 @@ export default function App() {
     return () => window.removeEventListener("resize", resize);
   }, [draw]);
 
-  // Drag helpers
   const getCanvasPos = (e, canvas) => {
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -188,7 +197,7 @@ export default function App() {
     const dpr = window.devicePixelRatio || 1;
     const H = canvas.height / dpr;
     const raw = 12 - ((y - 16) / (H - 34)) * 24;
-    return Math.round(Math.max(-12, Math.min(12, raw)) * 2) / 2;
+    return Math.round(Math.max(-12, Math.min(12, raw)) * 10) / 10;
   };
 
   const handleMouseDown = (e) => {
@@ -221,10 +230,22 @@ export default function App() {
     const name = modalName.trim();
     if (!name) return;
     const key = "custom_" + name.toLowerCase().replace(/\s+/g, "_");
-    setCustomPresets((prev) => ({ ...prev, [key]: { label: name, values: [...vals] } }));
+    const newPresets = { ...customPresets, [key]: { label: name, values: [...vals] } };
+    setCustomPresets(newPresets);
     setActivePreset(key);
     setShowModal(false);
     setModalName("");
+    invoke("save_presets", { json: JSON.stringify(newPresets) })
+      .then(() => console.log("Presets saved to disk"))
+      .catch((e) => console.error("Failed to save presets:", e));
+  };
+
+  const deletePreset = (key) => {
+  const updated = { ...customPresets };
+  delete updated[key];
+  setCustomPresets(updated);
+  if (activePreset === key) setActivePreset("flat");
+  invoke("save_presets", { json: JSON.stringify(updated) }).catch(console.error);
   };
 
   const reset = () => {
@@ -237,20 +258,18 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* Titlebar */}
       <div className="titlebar">
         <div className="tl">
           <div className="logo-dot" />
           <span className="app-name">Quick Equalizer</span>
         </div>
         <div className="win-controls">
-          <div className="wc wc-close" />
-          <div className="wc wc-min" />
-          <div className="wc wc-max" />
+          <div className="wc wc-min" onClick={() => invoke("minimize_window")}>─</div>
+          <div className="wc wc-max" onClick={() => invoke("maximize_window")}>🗖</div>
+          <div className="wc wc-close" onClick={() => invoke("close_window")}>✕</div>
         </div>
       </div>
 
-      {/* Device status bar */}
       <div className="device-bar">
         <div className="device-status">
           <div className={`device-pip ${apoFound ? "pip-on" : "pip-off"}`} />
@@ -261,23 +280,23 @@ export default function App() {
         <span className="device-hint">To change device, run APO setup</span>
       </div>
 
-      {/* Presets */}
       <div className="preset-row">
-        {Object.entries(allPresets).map(([key, preset]) => (
-          <button
-            key={key}
-            className={`preset-btn ${activePreset === key ? "active" : ""}`}
-            onClick={() => applyPreset(key, preset.values)}
-          >
-            {preset.label}
-          </button>
-        ))}
-        <button className="save-btn" onClick={() => setShowModal(true)}>
-          ＋ Save preset
-        </button>
-      </div>
+  {Object.entries(allPresets).map(([key, preset]) => (
+  <div key={key} className="preset-wrap">
+    <button
+      className={`preset-btn ${activePreset === key ? "active" : ""}`}
+      onClick={() => applyPreset(key, preset.values)}
+    >
+      {preset.label}
+    </button>
+    <button className="preset-delete" onClick={() => deletePreset(key)}>✕</button>
+  </div>
+))}
+  <button className="save-btn" onClick={() => setShowModal(true)}>
+    ＋ Save preset
+  </button>
+</div>
 
-      {/* EQ Canvas */}
       <div className="eq-area">
         <canvas
           ref={canvasRef}
@@ -293,7 +312,6 @@ export default function App() {
         />
       </div>
 
-      {/* Bottom row */}
       <div className="bottom-row">
         <div className="toggle-wrap" onClick={() => setEqOn((v) => !v)}>
           <div className={`tog ${eqOn ? "" : "tog-off"}`} />
@@ -304,7 +322,7 @@ export default function App() {
           <input
             type="range"
             className="preamp-slider"
-            min={-12} max={12} step={0.5}
+            min={-12} max={12} step={0.1}
             value={preamp}
             onChange={(e) => setPreamp(parseFloat(e.target.value))}
           />
@@ -313,7 +331,6 @@ export default function App() {
         <button className="reset-btn" onClick={reset}>Reset</button>
       </div>
 
-      {/* Save preset modal */}
       {showModal && (
         <div className="modal-overlay">
           <div className="modal">
