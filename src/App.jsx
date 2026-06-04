@@ -59,17 +59,18 @@ export default function App() {
     });
   }, []);
 
-  const openDeviceSetup = () => {
-    setDeviceLoading(true);
-    setShowDeviceSetup(true);
-    invoke("get_audio_devices")
-      .then((devices) => {
-        setAudioDevices(devices);
-        if (devices.length > 0) setSelectedDevice(devices[0]);
-        setDeviceLoading(false);
-      })
-      .catch(() => setDeviceLoading(false));
-  };
+const openDeviceSetup = () => {
+  setSelectedDevice(null);
+  setDeviceLoading(true);
+  setShowDeviceSetup(true);
+  invoke("get_audio_devices")
+    .then((devices) => {
+      setAudioDevices(devices);
+      if (devices.length > 0) setSelectedDevice(devices[0]);
+      setDeviceLoading(false);
+    })
+    .catch(() => setDeviceLoading(false));
+};
 
   const confirmDevice = () => {
     if (!selectedDevice) return;

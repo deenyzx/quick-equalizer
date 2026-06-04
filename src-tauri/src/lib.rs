@@ -9,13 +9,22 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Registry::{
-    RegOpenKeyExW, RegSetValueExW, RegCloseKey, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_SZ,
+    RegOpenKeyExW,
+    RegCreateKeyExW,
+    RegSetValueExW,
+    RegCloseKey,
+    HKEY_LOCAL_MACHINE,
+    KEY_SET_VALUE,
+    REG_SZ,
+    REG_OPTION_NON_VOLATILE,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
 use windows::core::PCWSTR;
 
 fn get_config_path() -> PathBuf {
-    PathBuf::from(r"C:\Program Files\EqualizerAPO\config\config.txt")
+    let exe_path = std::env::current_exe().unwrap_or_default();
+    let app_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
+    app_dir.join("config").join("config.txt")
 }
 
 fn get_presets_path() -> PathBuf {
@@ -111,49 +120,154 @@ fn get_audio_devices() -> Result<Vec<serde_json::Value>, String> {
 }
 
 #[tauri::command]
-fn configure_device(device_id: String, device_name: String) -> Result<(), String> {
-    let apo_config = PathBuf::from(r"C:\Program Files\EqualizerAPO\config\config.txt");
-    if !apo_config.exists() {
-        fs::write(&apo_config, "Preamp: 0 dB\n").map_err(|e| e.to_string())?;
+fn configure_device(
+    app: tauri::AppHandle,
+    device_id: String,
+    device_name: String
+) -> Result<(), String> {
+    // Get the directory where our app is installed
+    let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
+    let app_dir = exe_path.parent().ok_or("Can't find app directory")?;
+    let dll_path = app_dir.join("EqualizerAPO.dll");
+
+    if !dll_path.exists() {
+        return Err("EqualizerAPO.dll not found next to app".to_string());
     }
 
-    let device_list = PathBuf::from(r"C:\Program Files\EqualizerAPO\config\deviceList.txt");
-    fs::write(&device_list, format!("{}\n", device_name)).map_err(|e| e.to_string())?;
+    // Write config directory
+    let config_dir = app_dir.join("config");
+    fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+
+    let config_path = config_dir.join("config.txt");
+    if !config_path.exists() {
+        fs::write(&config_path, "Preamp: 0 dB\n").map_err(|e| e.to_string())?;
+    }
+
+    let device_list = config_dir.join("deviceList.txt");
+    fs::write(&device_list, format!("{}\n", device_name))
+        .map_err(|e| e.to_string())?;
 
     unsafe {
-        let key_path: Vec<u16> = format!(
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{}\\FxProperties",
-            device_id
-        )
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+        let dll_path_str = format!("{}\0", dll_path.to_string_lossy());
+        let dll_path_wide: Vec<u16> = dll_path_str.encode_utf16().collect();
+
+        // Register CLSID for EqualizerAPO — this is what Windows needs to load it
+        let clsid_path: Vec<u16> =
+            "SOFTWARE\\Classes\\CLSID\\{62dc1a93-ae24-464c-a43e-452f824c4250}\\InprocServer32\0"
+            .encode_utf16().collect();
 
         let mut hkey = windows::Win32::System::Registry::HKEY::default();
-        let result = RegOpenKeyExW(
+        let mut disposition = 0u32;
+        RegCreateKeyExW(
             HKEY_LOCAL_MACHINE,
-            PCWSTR(key_path.as_ptr()),
-            0,
+            PCWSTR(clsid_path.as_ptr()),
+            0, None,
+            REG_OPTION_NON_VOLATILE,
             KEY_SET_VALUE,
-            &mut hkey,
+            None, &mut hkey, Some(&mut disposition)
+        ).map_err(|e| e.to_string())?;
+
+        // Set DLL path
+        let dll_bytes = std::slice::from_raw_parts(
+            dll_path_wide.as_ptr() as *const u8,
+            dll_path_wide.len() * 2
         );
+        RegSetValueExW(hkey, PCWSTR(std::ptr::null()), 0, REG_SZ, Some(dll_bytes)).ok();
 
-        if result.is_ok() {
-            let value_name: Vec<u16> = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1\0"
-                .encode_utf16()
-                .collect();
-            let value_data: Vec<u16> = "{E4D6F3E0-1AF2-48D1-8739-67B81AB5B9D0}\0"
-                .encode_utf16()
-                .collect();
-            let bytes = std::slice::from_raw_parts(
-                value_data.as_ptr() as *const u8,
-                value_data.len() * 2,
+        // Set threading model
+        let threading_name: Vec<u16> = "ThreadingModel\0".encode_utf16().collect();
+        let threading_val: Vec<u16> = "Both\0".encode_utf16().collect();
+        let threading_bytes = std::slice::from_raw_parts(
+            threading_val.as_ptr() as *const u8,
+            threading_val.len() * 2
+        );
+        RegSetValueExW(hkey, PCWSTR(threading_name.as_ptr()), 0, REG_SZ, Some(threading_bytes)).ok();
+        RegCloseKey(hkey).ok();
+
+        // Also register EACD2258 wrapper CLSID pointing to same DLL
+        let wrapper_path: Vec<u16> =
+            "SOFTWARE\\Classes\\CLSID\\{EACD2258-FCAC-4FF4-B36D-419E924A6D79}\\InprocServer32\0"
+            .encode_utf16().collect();
+
+        let mut hkey2 = windows::Win32::System::Registry::HKEY::default();
+        let mut disposition2 = 0u32;
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(wrapper_path.as_ptr()),
+            0, None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None, &mut hkey2, Some(&mut disposition2)
+        ).ok();
+        RegSetValueExW(hkey2, PCWSTR(std::ptr::null()), 0, REG_SZ, Some(dll_bytes)).ok();
+        RegSetValueExW(hkey2, PCWSTR(threading_name.as_ptr()), 0, REG_SZ, Some(threading_bytes)).ok();
+        RegCloseKey(hkey2).ok();
+
+        // Write FxProperties for the selected device
+        let fx_path: Vec<u16> = format!(
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{}\\FxProperties\0",
+            device_id
+        ).encode_utf16().collect();
+
+        let mut hkey3 = windows::Win32::System::Registry::HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(fx_path.as_ptr()),
+            0, KEY_SET_VALUE,
+            &mut hkey3
+        ).is_ok() {
+            let val_name: Vec<u16> = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5\0"
+                .encode_utf16().collect();
+            let apo_guid: Vec<u16> = "{62dc1a93-ae24-464c-a43e-452f824c4250}\0"
+                .encode_utf16().collect();
+            let apo_bytes = std::slice::from_raw_parts(
+                apo_guid.as_ptr() as *const u8,
+                apo_guid.len() * 2
             );
-            RegSetValueExW(hkey, PCWSTR(value_name.as_ptr()), 0, REG_SZ, Some(bytes)).ok();
-            RegCloseKey(hkey).ok();
+            RegSetValueExW(hkey3, PCWSTR(val_name.as_ptr()), 0, REG_SZ, Some(apo_bytes)).ok();
+            RegCloseKey(hkey3).ok();
         }
-    }
 
+        // Also write the EqualizerAPO config path to registry
+        let apo_reg_path: Vec<u16> = "SOFTWARE\\EqualizerAPO\0".encode_utf16().collect();
+        let mut hkey4 = windows::Win32::System::Registry::HKEY::default();
+        let mut disposition4 = 0u32;
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(apo_reg_path.as_ptr()),
+            0, None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None, &mut hkey4, Some(&mut disposition4)
+        ).ok();
+
+        let install_path_str = format!("{}\0", app_dir.to_string_lossy());
+        let install_path_wide: Vec<u16> = install_path_str.encode_utf16().collect();
+        let install_bytes = std::slice::from_raw_parts(
+            install_path_wide.as_ptr() as *const u8,
+            install_path_wide.len() * 2
+        );
+        let install_name: Vec<u16> = "InstallPath\0".encode_utf16().collect();
+        let config_path_str = format!("{}\0", config_dir.to_string_lossy());
+        let config_path_wide: Vec<u16> = config_path_str.encode_utf16().collect();
+        let config_bytes = std::slice::from_raw_parts(
+            config_path_wide.as_ptr() as *const u8,
+            config_path_wide.len() * 2
+        );
+        let config_name: Vec<u16> = "ConfigPath\0".encode_utf16().collect();
+        RegSetValueExW(hkey4, PCWSTR(install_name.as_ptr()), 0, REG_SZ, Some(install_bytes)).ok();
+        RegSetValueExW(hkey4, PCWSTR(config_name.as_ptr()), 0, REG_SZ, Some(config_bytes)).ok();
+        RegCloseKey(hkey4).ok();
+    }
+        // Restart Windows Audio service to pick up new device registration
+    std::process::Command::new("net")
+        .args(["stop", "audiosrv"])
+        .status()
+        .ok();
+    std::process::Command::new("net")
+        .args(["start", "audiosrv"])
+        .status()
+        .ok();
     fs::write(get_setup_flag_path(), &device_name).map_err(|e| e.to_string())?;
     Ok(())
 }
