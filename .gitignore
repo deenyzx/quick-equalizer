@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Steam packaging
+/steam-depot/
+/src-tauri/webview2-runtime/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

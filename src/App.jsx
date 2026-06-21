@@ -46,6 +46,7 @@ export default function App() {
   const [selectedDevice, setSelectedDevice] = useState(null);
   const [deviceLoading, setDeviceLoading] = useState(false);
   const [deviceError, setDeviceError] = useState("");
+  const [setupBusy, setSetupBusy] = useState(false);
 
   const valsRef = useRef(vals);
   const draggingRef = useRef(dragging);
@@ -71,6 +72,14 @@ export default function App() {
         setDeviceLoading(false);
       })
       .catch(() => setDeviceLoading(false));
+  };
+
+  const runEngineSetup = () => {
+    setSetupBusy(true);
+    invoke("run_engine_setup")
+      .then(() => invoke("is_apo_installed").then(setApoFound).catch(() => {}))
+      .catch((e) => console.error("Engine setup:", e))
+      .finally(() => setSetupBusy(false));
   };
 
   const confirmDevice = () => {
@@ -415,7 +424,13 @@ export default function App() {
             <span className="apo-badge apo-badge-off">Setup needed</span>
           )}
         </div>
-        <button className="change-device-btn" onClick={openDeviceSetup}>Change device</button>
+        {apoFound ? (
+          <button className="change-device-btn" onClick={openDeviceSetup}>Change device</button>
+        ) : (
+          <button className="change-device-btn" onClick={runEngineSetup} disabled={setupBusy}>
+            {setupBusy ? "Setting up…" : "Set up"}
+          </button>
+        )}
       </div>
 
       <div className="preset-row">
