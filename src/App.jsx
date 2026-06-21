@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 const BANDS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -411,21 +410,12 @@ export default function App() {
           <span className="device-text">Active device</span>
           <span className="device-name">{activeDevice}</span>
           {apoFound ? (
-            <span className="apo-badge">APO active</span>
+            <span className="apo-badge">Active</span>
           ) : (
-            <span className="apo-badge apo-badge-off">APO not installed</span>
+            <span className="apo-badge apo-badge-off">Setup needed</span>
           )}
         </div>
-        {apoFound ? (
-          <button className="change-device-btn" onClick={openDeviceSetup}>Change device</button>
-        ) : (
-          <button
-            className="change-device-btn"
-            onClick={() => openUrl("https://sourceforge.net/projects/equalizerapo/")}
-          >
-            Get EqualizerAPO
-          </button>
-        )}
+        <button className="change-device-btn" onClick={openDeviceSetup}>Change device</button>
       </div>
 
       <div className="preset-row">
@@ -503,8 +493,8 @@ export default function App() {
             </p>
             {!apoFound && (
               <p style={{ fontSize: 11, color: "#f0a020", marginBottom: 12 }}>
-                EqualizerAPO isn't installed yet — your selection is saved, but the EQ won't affect
-                audio until you install it.
+                The audio engine isn't set up yet — your selection is saved and will apply once
+                setup completes.
               </p>
             )}
             {deviceError && (
