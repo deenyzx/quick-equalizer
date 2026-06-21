@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 const BANDS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -45,6 +46,7 @@ export default function App() {
   const [audioDevices, setAudioDevices] = useState([]);
   const [selectedDevice, setSelectedDevice] = useState(null);
   const [deviceLoading, setDeviceLoading] = useState(false);
+  const [deviceError, setDeviceError] = useState("");
 
   const valsRef = useRef(vals);
   const draggingRef = useRef(dragging);
@@ -60,6 +62,7 @@ export default function App() {
   }, []);
 
   const openDeviceSetup = () => {
+    setDeviceError("");
     setDeviceLoading(true);
     setShowDeviceSetup(true);
     invoke("get_audio_devices")
@@ -79,16 +82,29 @@ export default function App() {
     })
       .then(() => {
         setActiveDevice(selectedDevice.name);
-        setApoFound(true);
+        invoke("is_apo_installed").then(setApoFound).catch(() => {});
         setShowDeviceSetup(false);
       })
-      .catch((e) => console.error("Failed to configure device:", e));
+      .catch((e) => {
+        console.error("Failed to configure device:", e);
+        setDeviceError(typeof e === "string" ? e : "Failed to configure device");
+      });
   };
 
   useEffect(() => {
-    invoke("get_apo_device")
-      .then((device) => { setActiveDevice(device || "Unknown device"); setApoFound(true); })
-      .catch(() => { setActiveDevice("APO not detected"); setApoFound(false); });
+    invoke("is_apo_installed").then(setApoFound).catch(() => setApoFound(false));
+
+    // Show the user's configured device if there is one, otherwise the live default.
+    invoke("get_configured_device")
+      .then((name) => {
+        if (name) setActiveDevice(name);
+        else return invoke("get_default_device_name").then(setActiveDevice);
+      })
+      .catch(() =>
+        invoke("get_default_device_name")
+          .then(setActiveDevice)
+          .catch(() => setActiveDevice("Unknown device"))
+      );
 
     invoke("load_presets")
       .then((json) => {
@@ -96,9 +112,25 @@ export default function App() {
         if (Object.keys(saved).length > 0) setCustomPresets(saved);
       })
       .catch(console.error);
+
+    // Restore which built-in presets the user has deleted (issue #4).
+    invoke("load_hidden_builtins")
+      .then((json) => {
+        const hidden = JSON.parse(json);
+        if (Array.isArray(hidden) && hidden.length > 0) {
+          setBuiltinPresets((prev) => {
+            const next = { ...prev };
+            hidden.forEach((k) => delete next[k]);
+            return next;
+          });
+        }
+      })
+      .catch(console.error);
   }, []);
 
   useEffect(() => {
+    // Nothing to write to when EqualizerAPO isn't installed.
+    if (!apoFound) return;
     if (!eqOn) {
       invoke("write_eq_config", { config: "Preamp: 0 dB\n" }).catch(console.error);
       return;
@@ -108,7 +140,7 @@ export default function App() {
       lines.push(`Filter ${i + 1}: ON PK Fc ${BANDS[i]} Hz Gain ${gain >= 0 ? "+" : ""}${gain.toFixed(1)} dB Q 1.41`);
     });
     invoke("write_eq_config", { config: lines.join("\n") + "\n" }).catch(console.error);
-  }, [vals, preamp, eqOn]);
+  }, [vals, preamp, eqOn, apoFound]);
 
   const bX = useCallback((i, W) => PAD_LEFT + (i / (BANDS.length - 1)) * (W - PAD_LEFT - PAD_RIGHT), []);
   const bY = useCallback((v, H) => PAD_TOP + ((12 - v) / 24) * (H - PAD_TOP - PAD_BOTTOM), []);
@@ -342,6 +374,9 @@ export default function App() {
       const updated = { ...builtinPresets };
       delete updated[key];
       setBuiltinPresets(updated);
+      // Persist the deletion so the built-in doesn't reappear on restart (issue #4).
+      const hidden = Object.keys(DEFAULT_PRESETS).filter((k) => !updated[k]);
+      invoke("save_hidden_builtins", { json: JSON.stringify(hidden) }).catch(console.error);
       if (activePreset === key) setActivePreset(Object.keys(updated)[0] || "");
       return;
     }
@@ -375,9 +410,22 @@ export default function App() {
           <div className={`device-pip ${apoFound ? "pip-on" : "pip-off"}`} />
           <span className="device-text">Active device</span>
           <span className="device-name">{activeDevice}</span>
-          {apoFound && <span className="apo-badge">APO active</span>}
+          {apoFound ? (
+            <span className="apo-badge">APO active</span>
+          ) : (
+            <span className="apo-badge apo-badge-off">APO not installed</span>
+          )}
         </div>
-        <button className="change-device-btn" onClick={openDeviceSetup}>Change device</button>
+        {apoFound ? (
+          <button className="change-device-btn" onClick={openDeviceSetup}>Change device</button>
+        ) : (
+          <button
+            className="change-device-btn"
+            onClick={() => openUrl("https://sourceforge.net/projects/equalizerapo/")}
+          >
+            Get EqualizerAPO
+          </button>
+        )}
       </div>
 
       <div className="preset-row">
@@ -453,6 +501,15 @@ export default function App() {
             <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 12 }}>
               Choose which device the EQ should process. You can change this later.
             </p>
+            {!apoFound && (
+              <p style={{ fontSize: 11, color: "#f0a020", marginBottom: 12 }}>
+                EqualizerAPO isn't installed yet — your selection is saved, but the EQ won't affect
+                audio until you install it.
+              </p>
+            )}
+            {deviceError && (
+              <p style={{ fontSize: 11, color: "#e8441a", marginBottom: 12 }}>{deviceError}</p>
+            )}
             {deviceLoading ? (
               <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 12, marginBottom: 12 }}>Detecting devices...</div>
             ) : (
