@@ -248,8 +248,98 @@ fn maximize_window(window: tauri::WebviewWindow) {
     window.maximize().unwrap();
 }
 
+const ENGINE_SETUP_ARG: &str = "--engine-setup";
+
+/// Entry point for the privileged setup helper. Runs in an elevated copy of the
+/// app (spawned by `run_engine_setup`), performs the work that requires admin
+/// rights, then exits.
+///
+/// NOTE: the real audio-engine registration (architecture A or B) is not
+/// implemented yet — this is the scaffold that proves the elevation path works
+/// end to end. For now it just confirms it is running elevated and leaves a log.
+fn run_engine_setup_elevated() -> i32 {
+    let mut log_dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    log_dir.push("QuickEqualizer");
+    let _ = fs::create_dir_all(&log_dir);
+    let log = log_dir.join("engine_setup.log");
+
+    // Creating a directory under Program Files only succeeds when elevated, so
+    // it doubles as a proof-of-privilege probe.
+    let elevated = fs::create_dir_all(r"C:\Program Files\QuickEqualizer\engine").is_ok();
+
+    let _ = fs::write(
+        &log,
+        format!(
+            "engine setup ran; elevated={}\nTODO: register audio engine here (architecture A or B)\n",
+            elevated
+        ),
+    );
+
+    if elevated {
+        0
+    } else {
+        1
+    }
+}
+
+/// Relaunches the app elevated (one UAC prompt, branded as this app) to run the
+/// setup helper, waits for it, and reports whether it succeeded. Shared by both
+/// installation strategies; the helper body is filled in later.
+#[tauri::command]
+fn run_engine_setup() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_str = exe.to_string_lossy().replace('\'', "''");
+
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &format!(
+                "$p = Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -PassThru -Wait; exit $p.ExitCode",
+                exe_str, ENGINE_SETUP_ARG
+            ),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Setup didn't complete (exit {})",
+            status.code().unwrap_or(-1)
+        ))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // When launched as the elevated helper, do that work and exit before any UI.
+    if std::env::args().any(|a| a == ENGINE_SETUP_ARG) {
+        std::process::exit(run_engine_setup_elevated());
+    }
+
+    // Prefer a fixed-version WebView2 runtime bundled next to the exe (under
+    // `webview2/`) so the app works on machines without the system WebView2
+    // runtime — common on fresh Windows 10. Falls back to the system runtime.
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let wv = dir.join("webview2");
+                if wv.exists() {
+                    std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", wv);
+                }
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -280,7 +370,8 @@ pub fn run() {
             save_hidden_builtins,
             close_window,
             minimize_window,
-            maximize_window
+            maximize_window,
+            run_engine_setup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
