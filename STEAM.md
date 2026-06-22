@@ -64,13 +64,27 @@ Steam launches the app unelevated, so setup happens on demand:
   `requireAdministrator`, which would prompt on every launch and break the Steam
   overlay.
 
-> **Status: scaffold only.** `run_engine_setup_elevated()` currently just proves
-> the elevation path works (it confirms it is elevated and writes
-> `%APPDATA%\QuickEqualizer\engine_setup.log`). It does **not** yet register the
-> real audio engine — that is the next phase (architecture A: bundle & silently
-> run the engine's own installer, or B: bundle the DLLs and write the registry
-> ourselves). Until then, on a machine without the engine the app runs and looks
-> correct but shows "Setup needed" and won't process audio.
+The elevated helper now runs the **Option B** registration in `src-tauri/src/engine.rs`:
+copies + COM-registers the APO DLL, sets `DisableProtectedAudioDG`, takes ownership
+of the TrustedInstaller-locked `FxProperties` key and writes the effect values,
+and sets the config path. Every step's result is written to
+`%APPDATA%\QuickEqualizer\engine_setup.log` and surfaced in the UI.
+
+> **This code is compile-verified, not runtime-verified.** Two things must be
+> supplied before it actually works (both isolated as constants in `engine.rs`):
+>
+> 1. **The APO DLL.** Put it at `src-tauri/engine-bundle/EqualizerAPO.dll`
+>    (git-ignored). `build-steam.ps1` copies it into the depot as `engine/`, and
+>    at runtime the helper copies it to `C:\Program Files\QuickEqualizer\engine\`
+>    and registers it. For `pnpm tauri dev`, also place it at
+>    `src-tauri/target/debug/engine/EqualizerAPO.dll` to test locally.
+> 2. **The exact registry values from your RegShot capture** — `APO_CLSID` and
+>    `FX_VALUES` in `engine.rs`. The defaults are a best guess; modern Windows
+>    usually needs several composite-effect values, not one. Also verify the
+>    `ConfigPath` key (`CONFIG_PATH_KEY` / `CONFIG_PATH_VALUE`).
+>
+> A reboot (or device disable/enable) is required after registration for the APO
+> to load.
 
 ## What Steam needs from you (outside this repo)
 

@@ -68,5 +68,19 @@ re-run this script:
 "@
 }
 
+$engineBundle = Join-Path $root "src-tauri\engine-bundle"
+if (Test-Path $engineBundle) {
+  Copy-Item $engineBundle (Join-Path $OutDir "engine") -Recurse
+  Write-Host "    + bundled audio engine (engine/)" -ForegroundColor Green
+}
+else {
+  Write-Warning @"
+Audio engine DLL not found at:
+    $engineBundle
+The app will run, but first-run engine setup will fail (no DLL to register).
+Drop the APO DLL (as EqualizerAPO.dll) into that folder — see STEAM.md.
+"@
+}
+
 Write-Host "`nDone. Depot folder: $OutDir" -ForegroundColor Green
 Write-Host "Point your Steam depot at this folder's contents." -ForegroundColor Green

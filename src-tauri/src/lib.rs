@@ -8,17 +8,9 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_SZ,
-};
 use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
-use windows::core::PCWSTR;
 
-const APO_DIR: &str = r"C:\Program Files\EqualizerAPO";
-
-fn get_config_path() -> PathBuf {
-    PathBuf::from(APO_DIR).join("config").join("config.txt")
-}
+mod engine;
 
 fn get_presets_path() -> PathBuf {
     let mut path = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -28,12 +20,21 @@ fn get_presets_path() -> PathBuf {
     path
 }
 
-fn get_setup_flag_path() -> PathBuf {
+fn get_device_info_path() -> PathBuf {
     let mut path = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("QuickEqualizer");
     fs::create_dir_all(&path).ok();
-    path.push("device_configured");
+    path.push("device.json");
     path
+}
+
+/// (device_id, device_name) the user selected, if any.
+fn read_device_info() -> Option<(String, String)> {
+    let raw = fs::read_to_string(get_device_info_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let id = v.get("id")?.as_str()?.to_string();
+    let name = v.get("name")?.as_str()?.to_string();
+    Some((id, name))
 }
 
 fn get_hidden_builtins_path() -> PathBuf {
@@ -61,36 +62,28 @@ unsafe fn device_friendly_name(device: &IMMDevice) -> Option<String> {
 
 #[tauri::command]
 fn write_eq_config(config: String) -> Result<(), String> {
-    // No-op (but not an error) when EqualizerAPO isn't installed, so the UI
-    // can keep working as a configurator without crashing.
-    if !PathBuf::from(APO_DIR).exists() {
-        return Ok(());
+    let path = engine::config_txt_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
     }
-    fs::write(get_config_path(), config).map_err(|e| e.to_string())
+    fs::write(path, config).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn is_apo_installed() -> bool {
-    PathBuf::from(APO_DIR).exists()
+    engine::is_registered()
 }
 
 #[tauri::command]
 fn is_device_configured() -> bool {
-    get_setup_flag_path().exists()
+    get_device_info_path().exists()
 }
 
 /// Returns the device name the user previously selected (persisted locally),
 /// or an empty string if none has been configured yet.
 #[tauri::command]
 fn get_configured_device() -> Result<String, String> {
-    let p = get_setup_flag_path();
-    if p.exists() {
-        fs::read_to_string(&p)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| e.to_string())
-    } else {
-        Ok(String::new())
-    }
+    Ok(read_device_info().map(|(_, name)| name).unwrap_or_default())
 }
 
 /// Returns the friendly name of the current default playback device,
@@ -141,64 +134,12 @@ fn get_audio_devices() -> Result<Vec<serde_json::Value>, String> {
     }
 }
 
+/// Saves the user's device selection (id + name) locally. The actual privileged
+/// registration happens later in the elevated helper, which reads this back.
 #[tauri::command]
 fn configure_device(device_id: String, device_name: String) -> Result<(), String> {
-    let apo_config_dir = PathBuf::from(APO_DIR).join("config");
-
-    // Only touch EqualizerAPO's files / registry when it's actually installed.
-    // Without this guard, a fresh machine (no APO) would hard-fail here and the
-    // setup modal would get stuck with no feedback.
-    if apo_config_dir.exists() {
-        let apo_config = apo_config_dir.join("config.txt");
-        if !apo_config.exists() {
-            let _ = fs::write(&apo_config, "Preamp: 0 dB\n");
-        }
-
-        let device_list = apo_config_dir.join("deviceList.txt");
-        let _ = fs::write(&device_list, format!("{}\n", device_name));
-
-        // Best-effort APO activation via the registry. NOTE (issue #1): these
-        // exact keys still need verification via RegShot against APO's
-        // DeviceSelector on a clean install; treated as non-fatal for now.
-        unsafe {
-            let key_path: Vec<u16> = format!(
-                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{}\\FxProperties",
-                device_id
-            )
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-            let mut hkey = windows::Win32::System::Registry::HKEY::default();
-            let result = RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(key_path.as_ptr()),
-                0,
-                KEY_SET_VALUE,
-                &mut hkey,
-            );
-
-            if result.is_ok() {
-                let value_name: Vec<u16> = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1\0"
-                    .encode_utf16()
-                    .collect();
-                let value_data: Vec<u16> = "{E4D6F3E0-1AF2-48D1-8739-67B81AB5B9D0}\0"
-                    .encode_utf16()
-                    .collect();
-                let bytes = std::slice::from_raw_parts(
-                    value_data.as_ptr() as *const u8,
-                    value_data.len() * 2,
-                );
-                RegSetValueExW(hkey, PCWSTR(value_name.as_ptr()), 0, REG_SZ, Some(bytes)).ok();
-                RegCloseKey(hkey).ok();
-            }
-        }
-    }
-
-    // Always remember the user's selection locally, even if APO isn't installed
-    // yet, so the choice survives restarts and can be applied once APO appears.
-    fs::write(get_setup_flag_path(), &device_name).map_err(|e| e.to_string())?;
-    Ok(())
+    let info = serde_json::json!({ "id": device_id, "name": device_name });
+    fs::write(get_device_info_path(), info.to_string()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -258,27 +199,26 @@ const ENGINE_SETUP_ARG: &str = "--engine-setup";
 /// implemented yet — this is the scaffold that proves the elevation path works
 /// end to end. For now it just confirms it is running elevated and leaves a log.
 fn run_engine_setup_elevated() -> i32 {
-    let mut log_dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    log_dir.push("QuickEqualizer");
-    let _ = fs::create_dir_all(&log_dir);
-    let log = log_dir.join("engine_setup.log");
+    match read_device_info() {
+        Some((id, _name)) => engine::register_for_device(&id),
+        None => {
+            let _ = fs::write(
+                engine::log_path(),
+                "No device selected — pick a device before running setup.",
+            );
+            2
+        }
+    }
+}
 
-    // Creating a directory under Program Files only succeeds when elevated, so
-    // it doubles as a proof-of-privilege probe.
-    let elevated = fs::create_dir_all(r"C:\Program Files\QuickEqualizer\engine").is_ok();
-
-    let _ = fs::write(
-        &log,
-        format!(
-            "engine setup ran; elevated={}\nTODO: register audio engine here (architecture A or B)\n",
-            elevated
-        ),
-    );
-
-    if elevated {
-        0
+/// Returns the last engine-setup report so the UI can show what happened.
+#[tauri::command]
+fn read_engine_log() -> Result<String, String> {
+    let p = engine::log_path();
+    if p.exists() {
+        fs::read_to_string(&p).map_err(|e| e.to_string())
     } else {
-        1
+        Ok(String::new())
     }
 }
 
@@ -371,7 +311,8 @@ pub fn run() {
             close_window,
             minimize_window,
             maximize_window,
-            run_engine_setup
+            run_engine_setup,
+            read_engine_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
