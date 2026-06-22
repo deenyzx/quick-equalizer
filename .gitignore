@@ -15,6 +15,7 @@ dist-ssr
 # Steam packaging
 /steam-depot/
 /src-tauri/webview2-runtime/
+/src-tauri/engine-bundle/
 
 # Editor directories and files
 .vscode/*

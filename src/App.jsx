@@ -47,6 +47,7 @@ export default function App() {
   const [deviceLoading, setDeviceLoading] = useState(false);
   const [deviceError, setDeviceError] = useState("");
   const [setupBusy, setSetupBusy] = useState(false);
+  const [setupMsg, setSetupMsg] = useState("");
 
   const valsRef = useRef(vals);
   const draggingRef = useRef(dragging);
@@ -76,22 +77,32 @@ export default function App() {
 
   const runEngineSetup = () => {
     setSetupBusy(true);
+    setSetupMsg("");
     invoke("run_engine_setup")
-      .then(() => invoke("is_apo_installed").then(setApoFound).catch(() => {}))
-      .catch((e) => console.error("Engine setup:", e))
+      .then(() => {
+        invoke("is_apo_installed").then(setApoFound).catch(() => {});
+        setSetupMsg("Audio engine set up. A restart may be required for it to take effect.");
+      })
+      .catch(() => {
+        // Surface the per-step report so failures are visible, not silent.
+        invoke("read_engine_log")
+          .then((log) => setSetupMsg(log || "Setup failed."))
+          .catch(() => setSetupMsg("Setup failed."));
+      })
       .finally(() => setSetupBusy(false));
   };
 
   const confirmDevice = () => {
     if (!selectedDevice) return;
+    setDeviceError("");
     invoke("configure_device", {
       deviceId: selectedDevice.id,
       deviceName: selectedDevice.name,
     })
       .then(() => {
         setActiveDevice(selectedDevice.name);
-        invoke("is_apo_installed").then(setApoFound).catch(() => {});
         setShowDeviceSetup(false);
+        runEngineSetup();
       })
       .catch((e) => {
         console.error("Failed to configure device:", e);
@@ -432,6 +443,21 @@ export default function App() {
           </button>
         )}
       </div>
+
+      {setupMsg && (
+        <div
+          style={{
+            padding: "7px 18px",
+            fontSize: 11,
+            color: "rgba(255,255,255,0.6)",
+            whiteSpace: "pre-wrap",
+            borderBottom: "0.5px solid rgba(255,255,255,0.08)",
+            fontFamily: "ui-monospace, monospace",
+          }}
+        >
+          {setupMsg}
+        </div>
+      )}
 
       <div className="preset-row">
         {Object.entries(allPresets).map(([key, preset]) => (
