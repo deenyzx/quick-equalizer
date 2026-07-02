@@ -325,25 +325,46 @@ fn set_config_path() -> Result<(), String> {
 }
 
 fn write_fx_values(device_id: &str) -> Result<(), String> {
-    let subkey = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{device_id}\\FxProperties"
+    let render = format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{device_id}"
     );
-    // These keys are owned by TrustedInstaller; take ownership + grant admins.
-    let machine_path = format!("MACHINE\\{subkey}");
+    let fx_subkey = format!("{render}\\FxProperties");
+
     unsafe {
+        // The FxProperties key often doesn't exist yet, and even when it does the
+        // whole tree is owned by TrustedInstaller. Take ownership of the parent
+        // Render\{id} key (which always exists) and grant admins with inheritance,
+        // so we can then create/modify FxProperties underneath it.
         grant_full_access(
-            &machine_path,
+            &format!("MACHINE\\{render}"),
             SE_REGISTRY_KEY,
             WinBuiltinAdministratorsSid,
             KEY_ALL_ACCESS.0,
             true,
-        )?;
+        )
+        .map_err(|e| format!("{e} [key: MACHINE\\{render}]"))?;
 
-        let hkey = open_or_create(&subkey)?;
+        // Create FxProperties if missing (inherits admin access from the parent).
+        let hkey =
+            open_or_create(&fx_subkey).map_err(|e| format!("{e} [key: {fx_subkey}]"))?;
+        let _ = RegCloseKey(hkey);
+
+        // If FxProperties pre-existed with a locked ACL, take it over too. This is
+        // harmless when we just created it, so failures here are non-fatal.
+        let _ = grant_full_access(
+            &format!("MACHINE\\{fx_subkey}"),
+            SE_REGISTRY_KEY,
+            WinBuiltinAdministratorsSid,
+            KEY_ALL_ACCESS.0,
+            true,
+        );
+
+        let hkey =
+            open_or_create(&fx_subkey).map_err(|e| format!("{e} [key: {fx_subkey}]"))?;
         let mut err = None;
         for (name, value) in FX_VALUES {
             if let Err(e) = set_sz(hkey, name, value) {
-                err = Some(e);
+                err = Some(format!("{e} [value: {name}]"));
                 break;
             }
         }
@@ -394,6 +415,9 @@ pub fn register_for_device(device_id: &str) -> i32 {
         true
     );
     step!("set config path + permissions", set_config_path(), true);
+    report.push(format!(
+        "target: HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{device_id}\\FxProperties"
+    ));
     step!(
         "write device FxProperties",
         write_fx_values(device_id),
