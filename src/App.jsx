@@ -77,7 +77,7 @@ export default function App() {
 
   const runEngineSetup = () => {
     setSetupBusy(true);
-    setSetupMsg("");
+    setSetupMsg("Setting up… approve the Windows prompt.");
     invoke("run_engine_setup")
       .then(() => {
         invoke("is_apo_installed").then(setApoFound).catch(() => {});
@@ -435,13 +435,9 @@ export default function App() {
             <span className="apo-badge apo-badge-off">Setup needed</span>
           )}
         </div>
-        {apoFound ? (
-          <button className="change-device-btn" onClick={openDeviceSetup}>Change device</button>
-        ) : (
-          <button className="change-device-btn" onClick={runEngineSetup} disabled={setupBusy}>
-            {setupBusy ? "Setting up…" : "Set up"}
-          </button>
-        )}
+        <button className="change-device-btn" onClick={openDeviceSetup}>
+          {apoFound ? "Change device" : "Set up"}
+        </button>
       </div>
 
       {setupMsg && (
