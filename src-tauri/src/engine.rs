@@ -505,9 +505,19 @@ fn set_config_path() -> Result<(), String> {
     }
 }
 
+/// IMMDevice::GetId() returns "{0.0.0.00000000}.{guid}", but the MMDevices
+/// registry subkey is just the trailing "{guid}". Strip the container prefix.
+fn registry_device_key(device_id: &str) -> &str {
+    match device_id.rfind('{') {
+        Some(i) => &device_id[i..],
+        None => device_id,
+    }
+}
+
 fn write_fx_values(device_id: &str) -> Result<(), String> {
+    let device_key = registry_device_key(device_id);
     let render = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{device_id}"
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{device_key}"
     );
     let fx = format!("{render}\\FxProperties");
 
@@ -586,7 +596,8 @@ pub fn register_for_device(device_id: &str) -> i32 {
     );
     step!("set config path + permissions", set_config_path(), true);
     report.push(format!(
-        "target: HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{device_id}\\FxProperties"
+        "target: HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{}\\FxProperties",
+        registry_device_key(device_id)
     ));
     step!(
         "write device FxProperties",
