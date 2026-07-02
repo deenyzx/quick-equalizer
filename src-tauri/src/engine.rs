@@ -22,15 +22,15 @@
 
 use std::ffi::c_void;
 use std::fs;
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::ptr;
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LUID};
 use windows::Win32::Security::Authorization::{
-    SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS,
-    SE_FILE_OBJECT, SE_OBJECT_TYPE, SE_REGISTRY_KEY, TRUSTEE_IS_GROUP, TRUSTEE_IS_SID, TRUSTEE_W,
+    SetEntriesInAclW, SetNamedSecurityInfoW, SetSecurityInfo, EXPLICIT_ACCESS_W,
+    NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT, SE_OBJECT_TYPE, SE_REGISTRY_KEY,
+    TRUSTEE_IS_GROUP, TRUSTEE_IS_SID, TRUSTEE_W,
 };
 use windows::Win32::Security::{
     AdjustTokenPrivileges, CreateWellKnownSid, LookupPrivilegeValueW, ACL,
@@ -40,8 +40,8 @@ use windows::Win32::Security::{
     WinBuiltinAdministratorsSid, WinBuiltinUsersSid, WELL_KNOWN_SID_TYPE,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS,
-    KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE,
+    KEY_ALL_ACCESS, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -107,10 +107,19 @@ pub fn is_registered() -> bool {
     marker_path().exists() && engine_install_dir().join(ENGINE_DLL_NAME).exists()
 }
 
-fn bundled_dll() -> Option<PathBuf> {
+/// Locates the folder holding the bundled engine DLLs. Prefers `engine/` next to
+/// the exe (depot layout); falls back to `src-tauri/engine-bundle/` for dev runs,
+/// which survives `cargo clean` (unlike anything under target/).
+fn bundled_engine_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let candidate = exe.parent()?.join("engine").join(ENGINE_DLL_NAME);
-    candidate.exists().then_some(candidate)
+    let dir = exe.parent()?;
+    let beside = dir.join("engine");
+    if beside.is_dir() {
+        return Some(beside);
+    }
+    // Dev fallback: target/debug (or release) -> ../../engine-bundle
+    let dev = dir.join("..").join("..").join("engine-bundle");
+    dev.is_dir().then_some(dev)
 }
 
 // ── Wide-string + privilege helpers ─────────────────────────────────────────
@@ -215,6 +224,91 @@ unsafe fn grant_full_access(
     Ok(())
 }
 
+/// Take ownership of a registry key and grant Administrators full control using
+/// handle-based APIs. SeTakeOwnership (enabled earlier) lets us open the key for
+/// WRITE_OWNER even when the DACL denies us. The string-path SetNamedSecurityInfo
+/// variant fails on these MMDevices keys (Win32 2), so we go handle-based.
+unsafe fn take_regkey(subkey: &str) -> Result<(), String> {
+    const WRITE_OWNER: u32 = 0x0008_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const READ_CONTROL: u32 = 0x0002_0000;
+
+    let mut sid_buf = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
+    let psid = well_known_sid(WinBuiltinAdministratorsSid, &mut sid_buf)?;
+
+    // 1) Open for WRITE_OWNER (allowed via SeTakeOwnership) and set owner=Admins.
+    let mut hkey = HKEY::default();
+    let rc = RegOpenKeyExW(
+        HKEY_LOCAL_MACHINE,
+        PCWSTR(wide(subkey).as_ptr()),
+        0,
+        REG_SAM_FLAGS(WRITE_OWNER),
+        &mut hkey,
+    );
+    if rc != ERROR_SUCCESS {
+        return Err(format!("open for WRITE_OWNER failed (Win32 {})", rc.0));
+    }
+    let rc = SetSecurityInfo(
+        HANDLE(hkey.0),
+        SE_REGISTRY_KEY,
+        OWNER_SECURITY_INFORMATION,
+        psid,
+        PSID::default(),
+        None,
+        None,
+    );
+    let _ = RegCloseKey(hkey);
+    if rc != ERROR_SUCCESS {
+        return Err(format!("set owner failed (Win32 {})", rc.0));
+    }
+
+    // 2) Now owner: open for WRITE_DAC and grant admins full control (inheritable).
+    let mut hkey = HKEY::default();
+    let rc = RegOpenKeyExW(
+        HKEY_LOCAL_MACHINE,
+        PCWSTR(wide(subkey).as_ptr()),
+        0,
+        REG_SAM_FLAGS(WRITE_DAC | READ_CONTROL),
+        &mut hkey,
+    );
+    if rc != ERROR_SUCCESS {
+        return Err(format!("open for WRITE_DAC failed (Win32 {})", rc.0));
+    }
+    let ea = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: KEY_ALL_ACCESS.0,
+        grfAccessMode: SET_ACCESS,
+        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_GROUP,
+            ptstrName: PWSTR(psid.0 as *mut u16),
+        },
+    };
+    let mut new_acl: *mut ACL = ptr::null_mut();
+    let rc2 = SetEntriesInAclW(Some(&[ea]), None, &mut new_acl);
+    if rc2 != ERROR_SUCCESS {
+        let _ = RegCloseKey(hkey);
+        return Err(format!("SetEntriesInAcl failed (Win32 {})", rc2.0));
+    }
+    // new_acl is leaked (LocalFree omitted); the helper exits right after.
+    let rc = SetSecurityInfo(
+        HANDLE(hkey.0),
+        SE_REGISTRY_KEY,
+        DACL_SECURITY_INFORMATION,
+        PSID::default(),
+        PSID::default(),
+        Some(new_acl as *const ACL),
+        None,
+    );
+    let _ = RegCloseKey(hkey);
+    if rc != ERROR_SUCCESS {
+        return Err(format!("set DACL failed (Win32 {})", rc.0));
+    }
+    Ok(())
+}
+
 // ── Registry write helpers ──────────────────────────────────────────────────
 
 unsafe fn open_or_create(subkey: &str) -> Result<HKEY, String> {
@@ -258,32 +352,63 @@ unsafe fn set_dword(hkey: HKEY, name: &str, value: u32) -> Result<(), String> {
 
 // ── Individual setup steps ──────────────────────────────────────────────────
 
-/// Copy the bundled DLL into a stable location and COM-register it (which
-/// self-registers the APO via DllRegisterServer).
-fn install_and_register_dll() -> Result<(), String> {
-    let src = bundled_dll().ok_or_else(|| {
-        format!(
-            "bundled DLL not found next to exe at engine/{ENGINE_DLL_NAME} — ship it in the depot"
-        )
+/// Copy the whole bundled engine folder (the APO DLL + its dependency DLLs) into
+/// a stable install dir. We copy every file because audiodg loads the APO by full
+/// path and resolves its dependencies from that same directory.
+fn install_engine_files() -> Result<PathBuf, String> {
+    let src_dir = bundled_engine_dir().ok_or_else(|| {
+        "bundled engine folder not found (expected engine/ next to the exe, or \
+         src-tauri/engine-bundle/ in dev)"
+            .to_string()
     })?;
-    let dir = engine_install_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("create install dir: {e}"))?;
-    let dst = dir.join(ENGINE_DLL_NAME);
-    fs::copy(&src, &dst).map_err(|e| format!("copy DLL: {e}"))?;
+    let dst_dir = engine_install_dir();
+    fs::create_dir_all(&dst_dir).map_err(|e| format!("create install dir: {e}"))?;
 
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let status = std::process::Command::new("regsvr32")
-        .args(["/s", &dst.to_string_lossy()])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map_err(|e| format!("spawn regsvr32: {e}"))?;
-    if !status.success() {
-        return Err(format!(
-            "regsvr32 failed (exit {})",
-            status.code().unwrap_or(-1)
-        ));
+    let mut copied = 0;
+    for entry in fs::read_dir(&src_dir).map_err(|e| format!("read bundle: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().is_file() {
+            fs::copy(entry.path(), dst_dir.join(entry.file_name()))
+                .map_err(|e| format!("copy {:?}: {e}", entry.file_name()))?;
+            copied += 1;
+        }
     }
-    Ok(())
+    if copied == 0 {
+        return Err("bundle folder is empty".to_string());
+    }
+    let dll = dst_dir.join(ENGINE_DLL_NAME);
+    if !dll.exists() {
+        return Err(format!("{ENGINE_DLL_NAME} missing from bundle"));
+    }
+    Ok(dll)
+}
+
+/// Registers the APO's COM class by writing the CLSID keys directly. We do NOT
+/// use regsvr32: the APO imports audioeng.dll, which only loads inside
+/// audiodg.exe, so LoadLibrary (and thus regsvr32/DllRegisterServer) fails in a
+/// normal process. EqualizerAPO's own installer writes these keys directly too.
+///
+/// NOTE: this writes the standard in-proc COM server registration. If your
+/// RegShot capture shows additional CLSID / APO-metadata keys, add them here.
+fn register_apo_com(dll_path: &str) -> Result<(), String> {
+    unsafe {
+        let clsid_key = format!("SOFTWARE\\Classes\\CLSID\\{APO_CLSID}");
+        let hk = open_or_create(&clsid_key)?;
+        let _ = set_sz(hk, "", "QuickEqualizer Audio Engine");
+        let _ = RegCloseKey(hk);
+
+        let inproc = format!("{clsid_key}\\InprocServer32");
+        let hk = open_or_create(&inproc)?;
+        let r1 = set_sz(hk, "", dll_path);
+        let r2 = set_sz(hk, "ThreadingModel", "Both");
+        let _ = RegCloseKey(hk);
+        r1.and(r2)
+    }
+}
+
+fn install_and_register_dll() -> Result<(), String> {
+    let dll = install_engine_files()?;
+    register_apo_com(&dll.to_string_lossy())
 }
 
 fn set_disable_protected_audio() -> Result<(), String> {
@@ -331,33 +456,14 @@ fn write_fx_values(device_id: &str) -> Result<(), String> {
     let fx_subkey = format!("{render}\\FxProperties");
 
     unsafe {
-        // The FxProperties key often doesn't exist yet, and even when it does the
-        // whole tree is owned by TrustedInstaller. Take ownership of the parent
-        // Render\{id} key (which always exists) and grant admins with inheritance,
-        // so we can then create/modify FxProperties underneath it.
-        grant_full_access(
-            &format!("MACHINE\\{render}"),
-            SE_REGISTRY_KEY,
-            WinBuiltinAdministratorsSid,
-            KEY_ALL_ACCESS.0,
-            true,
-        )
-        .map_err(|e| format!("{e} [key: MACHINE\\{render}]"))?;
+        // The whole tree is owned by TrustedInstaller. Take ownership of the
+        // parent Render\{id} key (always present for a connected device) and grant
+        // admins with inheritance, so we can create/modify FxProperties under it.
+        take_regkey(&render).map_err(|e| format!("{e} [key: {render}]"))?;
 
-        // Create FxProperties if missing (inherits admin access from the parent).
-        let hkey =
-            open_or_create(&fx_subkey).map_err(|e| format!("{e} [key: {fx_subkey}]"))?;
-        let _ = RegCloseKey(hkey);
-
-        // If FxProperties pre-existed with a locked ACL, take it over too. This is
-        // harmless when we just created it, so failures here are non-fatal.
-        let _ = grant_full_access(
-            &format!("MACHINE\\{fx_subkey}"),
-            SE_REGISTRY_KEY,
-            WinBuiltinAdministratorsSid,
-            KEY_ALL_ACCESS.0,
-            true,
-        );
+        // If FxProperties already exists but is locked, take it over too. It won't
+        // exist yet on many devices, so failure here is non-fatal.
+        let _ = take_regkey(&fx_subkey);
 
         let hkey =
             open_or_create(&fx_subkey).map_err(|e| format!("{e} [key: {fx_subkey}]"))?;
