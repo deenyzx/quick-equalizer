@@ -423,11 +423,10 @@ fn install_engine_files() -> Result<PathBuf, String> {
     Ok(dll)
 }
 
-/// Registers one APO CLSID: the COM in-proc server, plus the AudioEngine APO
-/// metadata that RegisterAPO would normally write. We do NOT use regsvr32: the
-/// APO imports audioeng.dll, which only loads inside audiodg.exe, so LoadLibrary
-/// (and thus DllRegisterServer) fails in a normal process — EqualizerAPO's own
-/// installer writes these keys directly too.
+/// Fallback registration, used only if regsvr32 can't run: writes the COM in-proc
+/// server plus an approximation of the AudioProcessingObjects metadata that
+/// RegisterAPO produces. The primary path is regsvr32 (which invokes the DLL's
+/// own DllRegisterServer → the official RegisterAPO).
 fn register_one_apo(clsid: &str, dll_path: &str) -> Result<(), String> {
     unsafe {
         // COM in-proc server registration.
@@ -467,9 +466,33 @@ fn register_apo_com(dll_path: &str) -> Result<(), String> {
     register_one_apo(APO_POST_MIX_CLSID, dll_path)
 }
 
+/// Registers the APO via regsvr32, which loads the DLL (deps are beside it in the
+/// install dir) and runs its DllRegisterServer — the official RegisterAPO path.
+fn regsvr32_register(dll_path: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let status = std::process::Command::new("regsvr32")
+        .args(["/s", dll_path])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("spawn regsvr32: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("regsvr32 exit {}", status.code().unwrap_or(-1)))
+    }
+}
+
 fn install_and_register_dll() -> Result<(), String> {
     let dll = install_engine_files()?;
-    register_apo_com(&dll.to_string_lossy())
+    let dll_str = dll.to_string_lossy().to_string();
+    // Prefer the DLL's own DllRegisterServer (runs RegisterAPO for correct APO
+    // metadata). Fall back to writing the registry directly if regsvr32 fails.
+    match regsvr32_register(&dll_str) {
+        Ok(()) => Ok(()),
+        Err(e) => register_apo_com(&dll_str)
+            .map_err(|de| format!("regsvr32 failed ({e}); direct registration also failed ({de})")),
+    }
 }
 
 fn set_disable_protected_audio() -> Result<(), String> {
