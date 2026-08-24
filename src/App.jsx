@@ -186,17 +186,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // Nothing to write to when EqualizerAPO isn't installed.
+    // Nothing to write to when the engine isn't installed.
     if (!apoFound) return;
-    if (!eqOn) {
-      invoke("write_eq_config", { config: "Preamp: 0 dB\n" }).catch(console.error);
-      return;
-    }
-    const lines = [`Preamp: ${preamp >= 0 ? "+" : ""}${preamp.toFixed(1)} dB`];
-    vals.forEach((gain, i) => {
-      lines.push(`Filter ${i + 1}: ON PK Fc ${BANDS[i]} Hz Gain ${gain >= 0 ? "+" : ""}${gain.toFixed(1)} dB Q 1.41`);
-    });
-    invoke("write_eq_config", { config: lines.join("\n") + "\n" }).catch(console.error);
+    // Debounce: coalesce rapid changes (e.g. dragging the curve) into a single
+    // write, so the APO doesn't reload config.txt on every pixel of movement.
+    const id = setTimeout(() => {
+      let config;
+      if (!eqOn) {
+        config = "Preamp: 0 dB\n";
+      } else {
+        const lines = [`Preamp: ${preamp >= 0 ? "+" : ""}${preamp.toFixed(1)} dB`];
+        vals.forEach((gain, i) => {
+          lines.push(`Filter ${i + 1}: ON PK Fc ${BANDS[i]} Hz Gain ${gain >= 0 ? "+" : ""}${gain.toFixed(1)} dB Q 1.41`);
+        });
+        config = lines.join("\n") + "\n";
+      }
+      invoke("write_eq_config", { config }).catch(console.error);
+    }, 60);
+    return () => clearTimeout(id);
   }, [vals, preamp, eqOn, apoFound]);
 
   const bX = useCallback((i, W) => PAD_LEFT + (i / (BANDS.length - 1)) * (W - PAD_LEFT - PAD_RIGHT), []);
