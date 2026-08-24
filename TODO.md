@@ -27,14 +27,14 @@ Working branch: `steam-qeq` (all work here). `origin/main` untouched until it wo
 - [ ] Code-signing certificate (SmartScreen / Smart App Control warnings on end-user PCs)
 
 ## P1 — Robustness
-- [ ] "Restart required" prompt in the UI after successful setup
-- [ ] Graceful error UX when setup fails (surface the log to the user)
+- [x] "Restart required" prompt in the UI after successful setup
+- [x] Graceful error UX when setup fails (surface the log to the user)
 - [ ] Uninstall / cleanup path — remove APO registration + restore original (issue #6)
 - [ ] Test on a second device type (Bluetooth vs onboard/USB)
 
 ## P2 — Polish
 - [ ] App icon / branding pass
-- [ ] Persist EQ across app restarts / device changes without re-setup
+- [x] Persist EQ (curve, preamp, on/off, preset) across app restarts
 - [ ] Handle default-device change while running
 
 ## P2 — Launch / CV (after it works)
