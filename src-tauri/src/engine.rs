@@ -503,14 +503,12 @@ fn write_fx_values(device_id: &str) -> Result<(), String> {
         // FxProperties may exist with a locked ACL; non-fatal if it doesn't yet.
         let _ = take_regkey(&fx);
 
-        // Ensure FxProperties exists (inherits admin access from the parent).
-        let hkey = open_or_create(&fx).map_err(|e| format!("{e} [key: {fx}]"))?;
-        let _ = RegCloseKey(hkey);
-
-        // Remove legacy LFX/GFX entries so only the modern SFX/EFX slots apply.
+        // Remove legacy LFX/GFX entries so only the modern SFX/EFX slots apply
+        // (no-op if FxProperties doesn't exist yet).
         delete_value(&fx, FX_LFX_VALUE);
         delete_value(&fx, FX_GFX_VALUE);
 
+        // Create FxProperties if needed (inherits admin access from the parent).
         let hkey = open_or_create(&fx).map_err(|e| format!("{e} [key: {fx}]"))?;
         // SFX = pre-mix (per-stream), EFX = post-mix (endpoint).
         let res = (|| {
