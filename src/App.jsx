@@ -348,15 +348,11 @@ export default function App() {
           n[focused] = Math.round(Math.max(-12, Math.min(12, n[focused] + delta)) * 10) / 10;
           return n;
         });
-      } else if (e.key === "Escape") {
+      } else if (e.key === "Escape" || e.key === "Enter") {
         setFocusedBand(-1);
         focusedBandRef.current = -1;
         draw();
-      } else if (e.key === "Enter" || e.key === "Escape") {
-        setFocusedBand(-1);
-       focusedBandRef.current = -1;
-        draw();
-}
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -389,11 +385,10 @@ export default function App() {
     const { x, y, W } = getCanvasPos(e, canvas);
     const band = nearBand(x, W);
     if (band < 0) {
-    // clicked away from any band
-    setFocusedBand(-1);
-    focusedBandRef.current = -1;
-    }
-    else if (band >= 0) {
+      // clicked away from any band
+      setFocusedBand(-1);
+      focusedBandRef.current = -1;
+    } else {
       setDragging(band);
       draggingRef.current = band;
       setFocusedBand(band);
