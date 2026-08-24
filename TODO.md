@@ -29,7 +29,8 @@ Working branch: `steam-qeq` (all work here). `origin/main` untouched until it wo
 ## P1 — Robustness
 - [x] "Restart required" prompt in the UI after successful setup
 - [x] Graceful error UX when setup fails (surface the log to the user)
-- [ ] Uninstall / cleanup path — remove APO registration + restore original (issue #6)
+- [x] Uninstall / cleanup path — remove APO registration + installed files (issue #6)
+      *(compile-verified; test after install is confirmed)*
 - [ ] Test on a second device type (Bluetooth vs onboard/USB)
 
 ## P2 — Polish

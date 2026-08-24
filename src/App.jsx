@@ -117,6 +117,19 @@ export default function App() {
       .finally(() => setSetupBusy(false));
   };
 
+  const removeEngine = () => {
+    setSetupBusy(true);
+    setSetupMsg("Removing audio engine… approve the Windows prompt.");
+    invoke("uninstall_engine")
+      .then(() => {
+        invoke("is_apo_installed").then(setApoFound).catch(() => {});
+        setShowDeviceSetup(false);
+        setSetupMsg("Audio engine removed. Restart your PC to fully clear it.");
+      })
+      .catch((e) => setSetupMsg(typeof e === "string" ? e : "Remove failed."))
+      .finally(() => setSetupBusy(false));
+  };
+
   const confirmDevice = () => {
     if (!selectedDevice) return;
     setDeviceError("");
@@ -576,6 +589,27 @@ export default function App() {
                   </div>
                 ))}
               </div>
+            )}
+            {apoFound && (
+              <button
+                onClick={removeEngine}
+                disabled={setupBusy}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  marginBottom: 10,
+                  background: "transparent",
+                  border: "0.5px solid rgba(231,76,60,0.4)",
+                  color: "rgba(231,76,60,0.9)",
+                  borderRadius: 8,
+                  padding: "6px 10px",
+                  fontSize: 11,
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                Remove audio engine from this PC
+              </button>
             )}
             <div className="modal-btns">
               {apoFound && (

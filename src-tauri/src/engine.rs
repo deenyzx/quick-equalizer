@@ -34,8 +34,8 @@ use windows::Win32::Security::{
     WinBuiltinAdministratorsSid, WinBuiltinUsersSid, WELL_KNOWN_SID_TYPE,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY,
-    HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_SET_VALUE, REG_DWORD, REG_MULTI_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_SET_VALUE, REG_DWORD, REG_MULTI_SZ,
     REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -385,6 +385,11 @@ unsafe fn delete_value(subkey: &str, name: &str) {
     }
 }
 
+/// Best-effort recursive delete of an HKLM subkey (key + all subkeys/values).
+unsafe fn delete_tree(subkey: &str) {
+    let _ = RegDeleteTreeW(HKEY_LOCAL_MACHINE, PCWSTR(wide(subkey).as_ptr()));
+}
+
 // ── Individual setup steps ──────────────────────────────────────────────────
 
 /// Copy the whole bundled engine folder (the APO DLL + its dependency DLLs) into
@@ -619,4 +624,52 @@ pub fn register_for_device(device_id: &str) -> i32 {
     } else {
         1
     }
+}
+
+/// Reverses `register_for_device`: removes the device effect values, the COM/APO
+/// registrations, and the installed files. Best-effort — always returns 0 so the
+/// app can reset its state regardless of what was still present.
+pub fn unregister_for_device(device_id: Option<&str>) -> i32 {
+    let mut report: Vec<String> = Vec::new();
+
+    unsafe {
+        let _ = enable_privilege(SE_TAKE_OWNERSHIP_NAME);
+        let _ = enable_privilege(SE_RESTORE_NAME);
+
+        if let Some(id) = device_id {
+            let key = registry_device_key(id);
+            let render = format!(
+                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{key}"
+            );
+            let fx = format!("{render}\\FxProperties");
+            let _ = take_regkey(&render);
+            let _ = take_regkey(&fx);
+            delete_value(&fx, FX_SFX_VALUE);
+            delete_value(&fx, FX_EFX_VALUE);
+            delete_value(&fx, FX_SFX_MODES_VALUE);
+            delete_value(&fx, FX_EFX_MODES_VALUE);
+            report.push("removed device FxProperties values".to_string());
+        }
+
+        delete_tree(&format!("SOFTWARE\\Classes\\CLSID\\{APO_PRE_MIX_CLSID}"));
+        delete_tree(&format!("SOFTWARE\\Classes\\CLSID\\{APO_POST_MIX_CLSID}"));
+        delete_tree(&format!(
+            "SOFTWARE\\Classes\\AudioEngine\\AudioProcessingObjects\\{APO_PRE_MIX_CLSID}"
+        ));
+        delete_tree(&format!(
+            "SOFTWARE\\Classes\\AudioEngine\\AudioProcessingObjects\\{APO_POST_MIX_CLSID}"
+        ));
+        report.push("removed COM/APO registrations".to_string());
+    }
+
+    let _ = fs::remove_dir_all(engine_install_dir());
+    let _ = fs::remove_dir_all(engine_config_dir());
+    let _ = fs::remove_file(marker_path());
+    report.push("removed installed files".to_string());
+
+    let _ = fs::write(
+        log_path(),
+        format!("UNINSTALL:\n{}\n\nRESULT: done", report.join("\n")),
+    );
+    0
 }
