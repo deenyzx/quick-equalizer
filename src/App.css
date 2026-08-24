@@ -90,7 +90,6 @@ body {
 
 .device-text  { font-size: 11px; color: rgba(255,255,255,0.5); }
 .device-name  { font-size: 11px; color: rgba(255,255,255,0.9); font-weight: 600; }
-.device-hint  { font-size: 10px; color: rgba(255,255,255,0.28); }
 
 .change-device-btn {
   background: transparent;
@@ -106,6 +105,46 @@ body {
 .change-device-btn:hover {
   color: rgba(255,255,255,0.7);
   border-color: rgba(255,255,255,0.3);
+}
+
+/* Modal helper text — one base class, colour varies by state */
+.modal-note {
+  font-size: 11px;
+  margin-bottom: 12px;
+  color: rgba(255, 255, 255, 0.4);
+}
+.modal-note-warn  { color: #f0a020; }
+.modal-note-error { color: #e8441a; }
+.modal-note-load  { font-size: 12px; }
+
+.danger-btn {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+  background: transparent;
+  border: 0.5px solid rgba(231, 76, 60, 0.4);
+  color: rgba(231, 76, 60, 0.9);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.danger-btn:hover:not(:disabled) {
+  background: rgba(231, 76, 60, 0.12);
+  border-color: rgba(231, 76, 60, 0.7);
+}
+.danger-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* Engine setup / status report line */
+.setup-msg {
+  padding: 7px 18px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: pre-wrap;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+  font-family: ui-monospace, monospace;
 }
 
 .device-list {
@@ -245,9 +284,6 @@ body {
 .preset-delete:hover {
   color: #e8441a;
   border-color: rgba(232,68,26,0.5);
-}
-.preset-delete:hover {
-  color: #e8441a;
   background: rgba(232,68,26,0.1);
 }
 
