@@ -102,24 +102,30 @@ export default function App() {
     } catch {}
   }, [vals, eqOn, preamp, activePreset]);
 
-  useEffect(() => {
-    invoke("is_device_configured").then((configured) => {
-      if (!configured) openDeviceSetup();
-    });
-  }, []);
-
-  const openDeviceSetup = () => {
+  const openDeviceSetup = useCallback(() => {
     setDeviceError("");
     setDeviceLoading(true);
     setShowDeviceSetup(true);
     invoke("get_audio_devices")
       .then((devices) => {
         setAudioDevices(devices);
-        if (devices.length > 0) setSelectedDevice(devices[0]);
+        // Preselect the device already in use so re-opening this dialog and
+        // pressing Apply can't silently switch the user to another device.
+        invoke("get_configured_device")
+          .then((name) => {
+            setSelectedDevice(devices.find((d) => d.name === name) || devices[0] || null);
+          })
+          .catch(() => setSelectedDevice(devices[0] || null));
         setDeviceLoading(false);
       })
       .catch(() => setDeviceLoading(false));
-  };
+  }, []);
+
+  useEffect(() => {
+    invoke("is_device_configured").then((configured) => {
+      if (!configured) openDeviceSetup();
+    });
+  }, [openDeviceSetup]);
 
   const runEngineSetup = () => {
     setSetupBusy(true);
