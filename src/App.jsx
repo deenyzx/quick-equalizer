@@ -27,14 +27,27 @@ const PAD_RIGHT = 50;
 const PAD_TOP = 50;
 const PAD_BOTTOM = 28;
 
+// Restores a persisted value from localStorage, falling back if absent/invalid.
+function loadStored(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v == null ? fallback : JSON.parse(v);
+  } catch {
+    return fallback;
+  }
+}
+
 export default function App() {
   const canvasRef = useRef(null);
-  const [vals, setVals] = useState([...DEFAULT_PRESETS.flat.values]);
+  const [vals, setVals] = useState(() => {
+    const v = loadStored("qe_vals", null);
+    return Array.isArray(v) && v.length === BANDS.length ? v : [...DEFAULT_PRESETS.flat.values];
+  });
   const [dragging, setDragging] = useState(-1);
   const [focusedBand, setFocusedBand] = useState(-1);
-  const [eqOn, setEqOn] = useState(true);
-  const [preamp, setPreamp] = useState(0);
-  const [activePreset, setActivePreset] = useState("flat");
+  const [eqOn, setEqOn] = useState(() => loadStored("qe_eqOn", true));
+  const [preamp, setPreamp] = useState(() => loadStored("qe_preamp", 0));
+  const [activePreset, setActivePreset] = useState(() => loadStored("qe_activePreset", "flat"));
   const [builtinPresets, setBuiltinPresets] = useState({ ...DEFAULT_PRESETS });
   const [customPresets, setCustomPresets] = useState({});
   const [showModal, setShowModal] = useState(false);
@@ -55,6 +68,18 @@ export default function App() {
   valsRef.current = vals;
   draggingRef.current = dragging;
   focusedBandRef.current = focusedBand;
+
+  // Persist EQ state so it survives app restarts (the engine keeps applying the
+  // last-written config while the app is closed; without this, reopening would
+  // reset the curve to flat and overwrite it).
+  useEffect(() => {
+    try {
+      localStorage.setItem("qe_vals", JSON.stringify(vals));
+      localStorage.setItem("qe_eqOn", JSON.stringify(eqOn));
+      localStorage.setItem("qe_preamp", JSON.stringify(preamp));
+      localStorage.setItem("qe_activePreset", JSON.stringify(activePreset));
+    } catch {}
+  }, [vals, eqOn, preamp, activePreset]);
 
   useEffect(() => {
     invoke("is_device_configured").then((configured) => {
@@ -81,7 +106,7 @@ export default function App() {
     invoke("run_engine_setup")
       .then(() => {
         invoke("is_apo_installed").then(setApoFound).catch(() => {});
-        setSetupMsg("Audio engine set up. A restart may be required for it to take effect.");
+        setSetupMsg("Setup complete. Restart your PC to activate the equalizer.");
       })
       .catch(() => {
         // Surface the per-step report so failures are visible, not silent.
