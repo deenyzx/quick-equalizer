@@ -593,9 +593,54 @@ fn set_config_path() -> Result<(), String> {
     unsafe {
         let hkey = open_or_create(CONFIG_PATH_KEY)?;
         let r = set_sz(hkey, CONFIG_PATH_VALUE, &cfg.to_string_lossy());
+        // Verbose APO logging from inside audiodg. Invaluable while validating
+        // that the effect actually loads; set to "false" before release.
+        let _ = set_sz(hkey, "EnableTrace", "true");
         let _ = RegCloseKey(hkey);
         r
     }
+}
+
+/// The APO logs to GetTempPath()+EqualizerAPO.log. It runs inside audiodg.exe as
+/// LOCAL SERVICE, so the file normally lands in that service profile's temp
+/// directory, which a normal user process can't read.
+fn apo_log_candidates() -> Vec<PathBuf> {
+    let mut v = vec![PathBuf::from(
+        r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\Temp\EqualizerAPO.log",
+    )];
+    v.push(PathBuf::from(r"C:\Windows\Temp\EqualizerAPO.log"));
+    if let Ok(t) = std::env::var("TEMP") {
+        v.push(PathBuf::from(t).join("EqualizerAPO.log"));
+    }
+    v
+}
+
+/// Where we copy the APO log so the unelevated app can read it.
+pub fn apo_trace_copy_path() -> PathBuf {
+    let mut p = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    p.push("QuickEqualizer");
+    let _ = fs::create_dir_all(&p);
+    p.push("apo_trace.log");
+    p
+}
+
+/// Elevated: copy the APO's own log somewhere the app can read it. Returns an
+/// exit code so the helper can report success.
+pub fn collect_logs() -> i32 {
+    for candidate in apo_log_candidates() {
+        if candidate.exists() {
+            if fs::copy(&candidate, apo_trace_copy_path()).is_ok() {
+                return 0;
+            }
+        }
+    }
+    let _ = fs::write(
+        apo_trace_copy_path(),
+        "No EqualizerAPO.log found yet.\n\nThe audio engine writes this only once it is actually \
+         loaded by the Windows audio service — reboot after setup, play some audio, then try \
+         again. If it stays empty, the effect is not being loaded at all.\n",
+    );
+    1
 }
 
 /// IMMDevice::GetId() returns "{0.0.0.00000000}.{guid}", but the MMDevices

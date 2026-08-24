@@ -191,6 +191,7 @@ fn maximize_window(window: tauri::WebviewWindow) {
 
 const ENGINE_SETUP_ARG: &str = "--engine-setup";
 const ENGINE_UNINSTALL_ARG: &str = "--engine-uninstall";
+const ENGINE_COLLECT_LOGS_ARG: &str = "--engine-collect-logs";
 
 /// Entry point for the privileged setup helper — runs in an elevated copy of the
 /// app (spawned by `run_engine_setup`), registers the audio engine, then exits.
@@ -259,6 +260,20 @@ fn uninstall_engine() -> Result<(), String> {
     elevate_self(ENGINE_UNINSTALL_ARG)
 }
 
+/// Copies the audio engine's own log (written from inside the Windows audio
+/// service) somewhere readable, then returns it. This is the ground truth for
+/// whether the effect is actually being loaded.
+#[tauri::command]
+fn collect_engine_logs() -> Result<String, String> {
+    let _ = elevate_self(ENGINE_COLLECT_LOGS_ARG);
+    let p = engine::apo_trace_copy_path();
+    if p.exists() {
+        fs::read_to_string(&p).map_err(|e| e.to_string())
+    } else {
+        Err("Could not read the engine log.".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // When launched as the elevated helper, do that work and exit before any UI.
@@ -268,6 +283,9 @@ pub fn run() {
     if std::env::args().any(|a| a == ENGINE_UNINSTALL_ARG) {
         let id = read_device_info().map(|(id, _)| id);
         std::process::exit(engine::unregister_for_device(id.as_deref()));
+    }
+    if std::env::args().any(|a| a == ENGINE_COLLECT_LOGS_ARG) {
+        std::process::exit(engine::collect_logs());
     }
 
     // Prefer a fixed-version WebView2 runtime bundled next to the exe (under
@@ -318,6 +336,7 @@ pub fn run() {
             maximize_window,
             run_engine_setup,
             uninstall_engine,
+            collect_engine_logs,
             read_engine_log
         ])
         .run(tauri::generate_context!())
