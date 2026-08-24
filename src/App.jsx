@@ -21,6 +21,11 @@ const DEFAULT_PRESETS = {
 const ACCENT = "#e8441a";
 const ACCENT2 = "#f07820";
 
+// Trailing debounce for config writes. Long enough that a whole drag collapses
+// into a single write (the APO reloads config.txt on every change), short enough
+// that releasing the mouse feels instant.
+const EQ_WRITE_DEBOUNCE_MS = 120;
+
 // Canvas layout constants
 const PAD_LEFT = 50;
 const PAD_RIGHT = 50;
@@ -68,6 +73,22 @@ export default function App() {
   valsRef.current = vals;
   draggingRef.current = dragging;
   focusedBandRef.current = focusedBand;
+
+  // State + ref must move together: the ref is what draw() reads synchronously,
+  // before React has re-rendered.
+  const focusBand = useCallback((i) => {
+    setFocusedBand(i);
+    focusedBandRef.current = i;
+  }, []);
+
+  // Sets one band's gain, clamped to the ±12 dB range and rounded to 0.1 dB.
+  const setBandValue = useCallback((band, value) => {
+    setVals((prev) => {
+      const n = [...prev];
+      n[band] = Math.round(Math.max(-12, Math.min(12, value)) * 10) / 10;
+      return n;
+    });
+  }, []);
 
   // Persist EQ state so it survives app restarts (the engine keeps applying the
   // last-written config while the app is closed; without this, reopening would
@@ -190,6 +211,7 @@ export default function App() {
     if (!apoFound) return;
     // Debounce: coalesce rapid changes (e.g. dragging the curve) into a single
     // write, so the APO doesn't reload config.txt on every pixel of movement.
+    // A whole drag collapses to one write; still feels instant on release.
     const id = setTimeout(() => {
       let config;
       if (!eqOn) {
@@ -202,7 +224,7 @@ export default function App() {
         config = lines.join("\n") + "\n";
       }
       invoke("write_eq_config", { config }).catch(console.error);
-    }, 60);
+    }, EQ_WRITE_DEBOUNCE_MS);
     return () => clearTimeout(id);
   }, [vals, preamp, eqOn, apoFound]);
 
@@ -248,13 +270,18 @@ export default function App() {
     const currentVals = valsRef.current;
     const pts = currentVals.map((_, i) => [bX(i, W), bY(currentVals[i], H)]);
 
+    // Smooth curve through the band points (used for both the fill and the line).
+    const traceCurve = () => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const mx = (pts[i][0] + pts[i + 1][0]) / 2;
+        ctx.bezierCurveTo(mx, pts[i][1], mx, pts[i + 1][1], pts[i + 1][0], pts[i + 1][1]);
+      }
+    };
+
     // Filled area under curve
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 0; i < pts.length - 1; i++) {
-      const mx = (pts[i][0] + pts[i + 1][0]) / 2;
-      ctx.bezierCurveTo(mx, pts[i][1], mx, pts[i + 1][1], pts[i + 1][0], pts[i + 1][1]);
-    }
+    traceCurve();
     ctx.lineTo(W - PAD_RIGHT, H - PAD_BOTTOM);
     ctx.lineTo(PAD_LEFT, H - PAD_BOTTOM);
     ctx.closePath();
@@ -264,12 +291,7 @@ export default function App() {
     ctx.fillStyle = grad; ctx.fill();
 
     // Curve line
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 0; i < pts.length - 1; i++) {
-      const mx = (pts[i][0] + pts[i + 1][0]) / 2;
-      ctx.bezierCurveTo(mx, pts[i][1], mx, pts[i + 1][1], pts[i + 1][0], pts[i + 1][1]);
-    }
+    traceCurve();
     ctx.strokeStyle = ACCENT; ctx.lineWidth = 2; ctx.stroke();
 
     // Band dots
@@ -337,33 +359,24 @@ export default function App() {
 
       if (e.key === "ArrowRight") {
         e.preventDefault();
-        const next = focused < 0 ? 0 : Math.min(BANDS.length - 1, focused + 1);
-        setFocusedBand(next);
-        focusedBandRef.current = next;
+        focusBand(focused < 0 ? 0 : Math.min(BANDS.length - 1, focused + 1));
         draw();
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
-        const prev = focused < 0 ? 0 : Math.max(0, focused - 1);
-        setFocusedBand(prev);
-        focusedBandRef.current = prev;
+        focusBand(focused < 0 ? 0 : Math.max(0, focused - 1));
         draw();
       } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && focused >= 0) {
         e.preventDefault();
         const delta = e.key === "ArrowUp" ? 0.1 : -0.1;
-        setVals((prev) => {
-          const n = [...prev];
-          n[focused] = Math.round(Math.max(-12, Math.min(12, n[focused] + delta)) * 10) / 10;
-          return n;
-        });
+        setBandValue(focused, valsRef.current[focused] + delta);
       } else if (e.key === "Escape" || e.key === "Enter") {
-        setFocusedBand(-1);
-        focusedBandRef.current = -1;
+        focusBand(-1);
         draw();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [draw, showModal, showDeviceSetup]);
+  }, [draw, showModal, showDeviceSetup, focusBand, setBandValue]);
 
   const getCanvasPos = (e, canvas) => {
     const rect = canvas.getBoundingClientRect();
@@ -380,11 +393,11 @@ export default function App() {
     return bd < 30 ? best : -1;
   };
 
+  // Canvas y -> gain in dB. Clamping/rounding is handled by setBandValue.
   const yToVal = (y, canvas) => {
     const dpr = window.devicePixelRatio || 1;
     const H = canvas.height / dpr;
-    const raw = 12 - ((y - PAD_TOP) / (H - PAD_TOP - PAD_BOTTOM)) * 24;
-    return Math.round(Math.max(-12, Math.min(12, raw)) * 10) / 10;
+    return 12 - ((y - PAD_TOP) / (H - PAD_TOP - PAD_BOTTOM)) * 24;
   };
 
   const handleMouseDown = (e) => {
@@ -392,15 +405,12 @@ export default function App() {
     const { x, y, W } = getCanvasPos(e, canvas);
     const band = nearBand(x, W);
     if (band < 0) {
-      // clicked away from any band
-      setFocusedBand(-1);
-      focusedBandRef.current = -1;
+      focusBand(-1); // clicked away from any band
     } else {
       setDragging(band);
       draggingRef.current = band;
-      setFocusedBand(band);
-      focusedBandRef.current = band;
-      setVals((prev) => { const n = [...prev]; n[band] = yToVal(y, canvas); return n; });
+      focusBand(band);
+      setBandValue(band, yToVal(y, canvas));
     }
   };
 
@@ -408,8 +418,7 @@ export default function App() {
     if (draggingRef.current < 0) return;
     const canvas = canvasRef.current;
     const { y } = getCanvasPos(e, canvas);
-    const band = draggingRef.current;
-    setVals((prev) => { const n = [...prev]; n[band] = yToVal(y, canvas); return n; });
+    setBandValue(draggingRef.current, yToVal(y, canvas));
   };
 
   const handleMouseUp = () => { setDragging(-1); draggingRef.current = -1; draw(); };
@@ -480,20 +489,7 @@ export default function App() {
         </button>
       </div>
 
-      {setupMsg && (
-        <div
-          style={{
-            padding: "7px 18px",
-            fontSize: 11,
-            color: "rgba(255,255,255,0.6)",
-            whiteSpace: "pre-wrap",
-            borderBottom: "0.5px solid rgba(255,255,255,0.08)",
-            fontFamily: "ui-monospace, monospace",
-          }}
-        >
-          {setupMsg}
-        </div>
-      )}
+      {setupMsg && <div className="setup-msg">{setupMsg}</div>}
 
       <div className="preset-row">
         {Object.entries(allPresets).map(([key, preset]) => (
@@ -565,20 +561,18 @@ export default function App() {
         <div className="modal-overlay">
           <div className="modal" style={{ width: 320 }}>
             <div className="modal-title">Select audio device</div>
-            <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 12 }}>
+            <p className="modal-note">
               Choose which device the EQ should process. You can change this later.
             </p>
             {!apoFound && (
-              <p style={{ fontSize: 11, color: "#f0a020", marginBottom: 12 }}>
+              <p className="modal-note modal-note-warn">
                 The audio engine isn't set up yet — your selection is saved and will apply once
                 setup completes.
               </p>
             )}
-            {deviceError && (
-              <p style={{ fontSize: 11, color: "#e8441a", marginBottom: 12 }}>{deviceError}</p>
-            )}
+            {deviceError && <p className="modal-note modal-note-error">{deviceError}</p>}
             {deviceLoading ? (
-              <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 12, marginBottom: 12 }}>Detecting devices...</div>
+              <div className="modal-note modal-note-load">Detecting devices...</div>
             ) : (
               <div className="device-list">
                 {audioDevices.map((d) => (
@@ -593,23 +587,7 @@ export default function App() {
               </div>
             )}
             {apoFound && (
-              <button
-                onClick={removeEngine}
-                disabled={setupBusy}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  marginBottom: 10,
-                  background: "transparent",
-                  border: "0.5px solid rgba(231,76,60,0.4)",
-                  color: "rgba(231,76,60,0.9)",
-                  borderRadius: 8,
-                  padding: "6px 10px",
-                  fontSize: 11,
-                  cursor: "pointer",
-                  fontFamily: "inherit",
-                }}
-              >
+              <button className="danger-btn" onClick={removeEngine} disabled={setupBusy}>
                 Remove audio engine from this PC
               </button>
             )}
