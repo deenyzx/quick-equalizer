@@ -22,20 +22,22 @@ use std::ptr;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LUID};
 use windows::Win32::Security::Authorization::{
-    SetEntriesInAclW, SetNamedSecurityInfoW, SetSecurityInfo, EXPLICIT_ACCESS_W,
-    NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT, SE_OBJECT_TYPE, SE_REGISTRY_KEY,
-    TRUSTEE_IS_GROUP, TRUSTEE_IS_SID, TRUSTEE_W,
+    GetNamedSecurityInfoW, GetSecurityInfo, SetEntriesInAclW, SetNamedSecurityInfoW,
+    SetSecurityInfo, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT,
+    SE_OBJECT_TYPE, SE_REGISTRY_KEY, TRUSTEE_IS_GROUP, TRUSTEE_IS_SID, TRUSTEE_W,
 };
 use windows::Win32::Security::{
     AdjustTokenPrivileges, CreateWellKnownSid, LookupPrivilegeValueW, ACL,
-    DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES, OWNER_SECURITY_INFORMATION, PSID,
+    DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID,
     SECURITY_MAX_SID_SIZE, SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SE_TAKE_OWNERSHIP_NAME,
     SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
-    WinBuiltinAdministratorsSid, WinBuiltinUsersSid, WELL_KNOWN_SID_TYPE,
+    WinBuiltinAdministratorsSid, WinBuiltinUsersSid, WinLocalServiceSid, WinLocalSystemSid,
+    WELL_KNOWN_SID_TYPE,
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
-    HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_SET_VALUE, REG_DWORD, REG_MULTI_SZ,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_MULTI_SZ,
     REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -203,8 +205,31 @@ unsafe fn grant_full_access(
         },
     };
 
+    // Merge into the existing DACL rather than replacing it, so we don't strip
+    // SYSTEM/Administrators (and thus lock out the audio service).
+    let mut old_dacl: *mut ACL = ptr::null_mut();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let got_old = GetNamedSecurityInfoW(
+        PCWSTR(obj_w.as_ptr()),
+        obj_type,
+        DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        Some(&mut old_dacl),
+        None,
+        &mut sd,
+    ) == ERROR_SUCCESS;
+
     let mut new_acl: *mut ACL = ptr::null_mut();
-    let rc = SetEntriesInAclW(Some(&[ea]), None, &mut new_acl);
+    let rc = SetEntriesInAclW(
+        Some(&[ea]),
+        if got_old && !old_dacl.is_null() {
+            Some(old_dacl as *const ACL)
+        } else {
+            None
+        },
+        &mut new_acl,
+    );
     if rc != ERROR_SUCCESS {
         return Err(format!("SetEntriesInAcl failed (Win32 {})", rc.0));
     }
@@ -276,20 +301,65 @@ unsafe fn take_regkey(subkey: &str) -> Result<(), String> {
     if rc != ERROR_SUCCESS {
         return Err(format!("open for WRITE_DAC failed (Win32 {})", rc.0));
     }
-    let ea = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: KEY_ALL_ACCESS.0,
-        grfAccessMode: SET_ACCESS,
-        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-        Trustee: TRUSTEE_W {
-            pMultipleTrustee: ptr::null_mut(),
-            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_GROUP,
-            ptstrName: PWSTR(psid.0 as *mut u16),
-        },
-    };
+    // Grant every principal that must reach this key. We set these explicitly
+    // (rather than only adding Administrators) so the key ends up in a known-good
+    // state even if a previous run replaced its DACL: audiodg.exe runs as
+    // LOCAL SERVICE and must be able to READ FxProperties, and SYSTEM/Users need
+    // their normal access back.
+    let grants: [(WELL_KNOWN_SID_TYPE, u32); 4] = [
+        (WinBuiltinAdministratorsSid, KEY_ALL_ACCESS.0),
+        (WinLocalSystemSid, KEY_ALL_ACCESS.0),
+        (WinLocalServiceSid, KEY_READ.0),
+        (WinBuiltinUsersSid, KEY_READ.0),
+    ];
+    let mut sid_bufs: Vec<Vec<u8>> = Vec::new();
+    let mut eas: Vec<EXPLICIT_ACCESS_W> = Vec::new();
+    for (kind, access) in grants {
+        let mut buf = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
+        let sid = match well_known_sid(kind, &mut buf) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        eas.push(EXPLICIT_ACCESS_W {
+            grfAccessPermissions: access,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_GROUP,
+                ptstrName: PWSTR(sid.0 as *mut u16),
+            },
+        });
+        sid_bufs.push(buf); // keep each SID alive until SetEntriesInAcl runs
+    }
+
+    // Merge into the key's EXISTING DACL. Passing None as the old ACL would build
+    // an ACL containing only our entries, stripping everything else.
+    let mut old_dacl: *mut ACL = ptr::null_mut();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let got_old = GetSecurityInfo(
+        HANDLE(hkey.0),
+        SE_REGISTRY_KEY,
+        DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        Some(&mut old_dacl),
+        None,
+        Some(&mut sd),
+    ) == ERROR_SUCCESS;
+
     let mut new_acl: *mut ACL = ptr::null_mut();
-    let rc2 = SetEntriesInAclW(Some(&[ea]), None, &mut new_acl);
+    let rc2 = SetEntriesInAclW(
+        Some(&eas),
+        if got_old && !old_dacl.is_null() {
+            Some(old_dacl as *const ACL)
+        } else {
+            None
+        },
+        &mut new_acl,
+    );
     if rc2 != ERROR_SUCCESS {
         let _ = RegCloseKey(hkey);
         return Err(format!("SetEntriesInAcl failed (Win32 {})", rc2.0));
