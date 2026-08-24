@@ -91,7 +91,7 @@ fn get_configured_device() -> Result<String, String> {
 #[tauri::command]
 fn get_default_device_name() -> Result<String, String> {
     unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED).ok();
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| e.to_string())?;
         let device = enumerator
@@ -104,7 +104,7 @@ fn get_default_device_name() -> Result<String, String> {
 #[tauri::command]
 fn get_audio_devices() -> Result<Vec<serde_json::Value>, String> {
     unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED).ok();
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| e.to_string())?;
@@ -190,14 +190,10 @@ fn maximize_window(window: tauri::WebviewWindow) {
 }
 
 const ENGINE_SETUP_ARG: &str = "--engine-setup";
+const ENGINE_UNINSTALL_ARG: &str = "--engine-uninstall";
 
-/// Entry point for the privileged setup helper. Runs in an elevated copy of the
-/// app (spawned by `run_engine_setup`), performs the work that requires admin
-/// rights, then exits.
-///
-/// NOTE: the real audio-engine registration (architecture A or B) is not
-/// implemented yet — this is the scaffold that proves the elevation path works
-/// end to end. For now it just confirms it is running elevated and leaves a log.
+/// Entry point for the privileged setup helper — runs in an elevated copy of the
+/// app (spawned by `run_engine_setup`), registers the audio engine, then exits.
 fn run_engine_setup_elevated() -> i32 {
     match read_device_info() {
         Some((id, _name)) => engine::register_for_device(&id),
@@ -222,11 +218,9 @@ fn read_engine_log() -> Result<String, String> {
     }
 }
 
-/// Relaunches the app elevated (one UAC prompt, branded as this app) to run the
-/// setup helper, waits for it, and reports whether it succeeded. Shared by both
-/// installation strategies; the helper body is filled in later.
-#[tauri::command]
-fn run_engine_setup() -> Result<(), String> {
+/// Relaunches the app elevated (one UAC prompt, branded as this app) with the
+/// given hidden flag, waits for it, and reports whether it succeeded.
+fn elevate_self(arg: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -241,7 +235,7 @@ fn run_engine_setup() -> Result<(), String> {
             "-Command",
             &format!(
                 "$p = Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -PassThru -Wait; exit $p.ExitCode",
-                exe_str, ENGINE_SETUP_ARG
+                exe_str, arg
             ),
         ])
         .creation_flags(CREATE_NO_WINDOW)
@@ -251,11 +245,18 @@ fn run_engine_setup() -> Result<(), String> {
     if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "Setup didn't complete (exit {})",
-            status.code().unwrap_or(-1)
-        ))
+        Err(format!("Didn't complete (exit {})", status.code().unwrap_or(-1)))
     }
+}
+
+#[tauri::command]
+fn run_engine_setup() -> Result<(), String> {
+    elevate_self(ENGINE_SETUP_ARG)
+}
+
+#[tauri::command]
+fn uninstall_engine() -> Result<(), String> {
+    elevate_self(ENGINE_UNINSTALL_ARG)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -263,6 +264,10 @@ pub fn run() {
     // When launched as the elevated helper, do that work and exit before any UI.
     if std::env::args().any(|a| a == ENGINE_SETUP_ARG) {
         std::process::exit(run_engine_setup_elevated());
+    }
+    if std::env::args().any(|a| a == ENGINE_UNINSTALL_ARG) {
+        let id = read_device_info().map(|(id, _)| id);
+        std::process::exit(engine::unregister_for_device(id.as_deref()));
     }
 
     // Prefer a fixed-version WebView2 runtime bundled next to the exe (under
@@ -312,6 +317,7 @@ pub fn run() {
             minimize_window,
             maximize_window,
             run_engine_setup,
+            uninstall_engine,
             read_engine_log
         ])
         .run(tauri::generate_context!())
