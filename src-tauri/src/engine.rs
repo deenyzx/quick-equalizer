@@ -528,6 +528,31 @@ fn write_fx_values(device_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Strips our effect values from a device's FxProperties, leaving any other
+/// effects on that device intact. Best-effort.
+fn remove_fx_values(device_id: &str) {
+    let key = registry_device_key(device_id);
+    let render =
+        format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{key}");
+    let fx = format!("{render}\\FxProperties");
+    unsafe {
+        let _ = take_regkey(&render);
+        let _ = take_regkey(&fx);
+        delete_value(&fx, FX_SFX_VALUE);
+        delete_value(&fx, FX_EFX_VALUE);
+        delete_value(&fx, FX_SFX_MODES_VALUE);
+        delete_value(&fx, FX_EFX_MODES_VALUE);
+    }
+}
+
+/// The device id we last registered on, if any (stored in the marker file).
+fn previously_registered_device() -> Option<String> {
+    fs::read_to_string(marker_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "1")
+}
+
 // ── Orchestration (called by the elevated helper) ───────────────────────────
 
 /// Runs every setup step for `device_id`, writing a detailed report to the log.
@@ -567,6 +592,17 @@ pub fn register_for_device(device_id: &str) -> i32 {
         true
     );
     step!("set config path + permissions", set_config_path(), true);
+
+    // If we were previously registered on a different device, strip our effect
+    // values from it first — otherwise the EQ stays active on the old device and
+    // uninstall would never clean it up.
+    if let Some(old) = previously_registered_device() {
+        if registry_device_key(&old) != registry_device_key(device_id) {
+            remove_fx_values(&old);
+            report.push("removed effect from previously configured device".to_string());
+        }
+    }
+
     report.push(format!(
         "target: HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{}\\FxProperties",
         registry_device_key(device_id)
@@ -586,7 +622,9 @@ pub fn register_for_device(device_id: &str) -> i32 {
     let _ = fs::write(log_path(), report.join("\n"));
 
     if critical_ok {
-        let _ = fs::write(marker_path(), "1");
+        // Record which device we registered, so a later device change or
+        // uninstall knows exactly what to clean up.
+        let _ = fs::write(marker_path(), device_id);
         0
     } else {
         1
@@ -602,22 +640,40 @@ pub fn unregister_for_device(device_id: Option<&str>) -> i32 {
     unsafe {
         let _ = enable_privilege(SE_TAKE_OWNERSHIP_NAME);
         let _ = enable_privilege(SE_RESTORE_NAME);
+    }
 
-        if let Some(id) = device_id {
-            let key = registry_device_key(id);
-            let render = format!(
-                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{key}"
-            );
-            let fx = format!("{render}\\FxProperties");
-            let _ = take_regkey(&render);
-            let _ = take_regkey(&fx);
-            delete_value(&fx, FX_SFX_VALUE);
-            delete_value(&fx, FX_EFX_VALUE);
-            delete_value(&fx, FX_SFX_MODES_VALUE);
-            delete_value(&fx, FX_EFX_MODES_VALUE);
-            report.push("removed device FxProperties values".to_string());
+    // Clean the device we were told about, and also the one we recorded at
+    // registration time (they can differ if the selection changed since).
+    let mut cleaned: Vec<String> = Vec::new();
+    for id in device_id
+        .map(str::to_string)
+        .into_iter()
+        .chain(previously_registered_device())
+    {
+        let key = registry_device_key(&id).to_string();
+        if cleaned.contains(&key) {
+            continue;
         }
+        remove_fx_values(&id);
+        cleaned.push(key);
+    }
+    if !cleaned.is_empty() {
+        report.push(format!("removed effect from {} device(s)", cleaned.len()));
+    }
 
+    // Let the DLL undo its own registration (symmetric with regsvr32 on install),
+    // then remove anything it left behind.
+    let dll = engine_install_dir().join(ENGINE_DLL_NAME);
+    if dll.exists() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("regsvr32")
+            .args(["/s", "/u", &dll.to_string_lossy()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+
+    unsafe {
         delete_tree(&format!("SOFTWARE\\Classes\\CLSID\\{APO_PRE_MIX_CLSID}"));
         delete_tree(&format!("SOFTWARE\\Classes\\CLSID\\{APO_POST_MIX_CLSID}"));
         delete_tree(&format!(
