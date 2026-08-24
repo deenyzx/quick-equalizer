@@ -50,10 +50,6 @@ const APO_POST_MIX_CLSID: &str = "{EC1CC9CE-FAED-4822-828A-82A81A6F018F}";
 
 /// AUDIO_SIGNALPROCESSINGMODE_DEFAULT — the processing mode the effect applies to.
 const DEFAULT_PROCESSING_MODE: &str = "{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}";
-/// IID of IAudioProcessingObject (the interface the APO exposes).
-const IID_AUDIO_PROCESSING_OBJECT: &str = "{FD7F2B29-24D0-4B5C-B177-592C39F9CA10}";
-/// APO_FLAG_FRAMESPERSECOND_MUST_MATCH | BITSPERSAMPLE_MUST_MATCH | INPLACE.
-const APO_FLAGS: u32 = 0x4 | 0x8 | 0x1;
 
 // FxProperties value names (fmtid {d04e05a6-…} = effect CLSIDs). Modern Windows
 // render devices use the SFX (stream/pre-mix) and EFX (endpoint/post-mix) slots.
@@ -423,56 +419,18 @@ fn install_engine_files() -> Result<PathBuf, String> {
     Ok(dll)
 }
 
-/// Fallback registration, used only if regsvr32 can't run: writes the COM in-proc
-/// server plus an approximation of the AudioProcessingObjects metadata that
-/// RegisterAPO produces. The primary path is regsvr32 (which invokes the DLL's
-/// own DllRegisterServer → the official RegisterAPO).
-fn register_one_apo(clsid: &str, dll_path: &str) -> Result<(), String> {
-    unsafe {
-        // COM in-proc server registration.
-        let clsid_key = format!("SOFTWARE\\Classes\\CLSID\\{clsid}");
-        let hk = open_or_create(&clsid_key)?;
-        let _ = set_sz(hk, "", "QuickEqualizer Audio Engine");
-        let _ = RegCloseKey(hk);
+/// Installs the engine files, then registers the APO by running the DLL's own
+/// DllRegisterServer via regsvr32. regsvr32 loads the DLL with its dependencies
+/// beside it (in the install dir) and calls the official RegisterAPO — so the COM
+/// class and AudioProcessingObjects metadata are written by EqualizerAPO itself,
+/// with nothing hand-rolled to keep in sync.
+fn install_and_register_dll() -> Result<(), String> {
+    let dll = install_engine_files()?;
 
-        let hk = open_or_create(&format!("{clsid_key}\\InprocServer32"))?;
-        set_sz(hk, "", dll_path)?;
-        let r = set_sz(hk, "ThreadingModel", "Both");
-        let _ = RegCloseKey(hk);
-        r?;
-
-        // APO registration metadata (mirrors CRegAPOProperties in EqualizerAPO.cpp).
-        let apo_key = format!("SOFTWARE\\Classes\\AudioEngine\\AudioProcessingObjects\\{clsid}");
-        let hk = open_or_create(&apo_key)?;
-        let _ = set_sz(hk, "FriendlyName", "QuickEqualizer Audio Engine");
-        let _ = set_sz(hk, "CopyrightInfo", "Copyright (C) 2015");
-        let _ = set_dword(hk, "MajorVersion", 1);
-        let _ = set_dword(hk, "MinorVersion", 0);
-        let _ = set_dword(hk, "Flags", APO_FLAGS);
-        let _ = set_dword(hk, "MinInputConnections", 1);
-        let _ = set_dword(hk, "MaxInputConnections", 1);
-        let _ = set_dword(hk, "MinOutputConnections", 1);
-        let _ = set_dword(hk, "MaxOutputConnections", 1);
-        let _ = set_dword(hk, "MaxInstances", 0xFFFF_FFFF);
-        let _ = set_dword(hk, "NumAPOInterfaces", 1);
-        let _ = set_sz(hk, "APOInterface0", IID_AUDIO_PROCESSING_OBJECT);
-        let _ = RegCloseKey(hk);
-    }
-    Ok(())
-}
-
-fn register_apo_com(dll_path: &str) -> Result<(), String> {
-    register_one_apo(APO_PRE_MIX_CLSID, dll_path)?;
-    register_one_apo(APO_POST_MIX_CLSID, dll_path)
-}
-
-/// Registers the APO via regsvr32, which loads the DLL (deps are beside it in the
-/// install dir) and runs its DllRegisterServer — the official RegisterAPO path.
-fn regsvr32_register(dll_path: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let status = std::process::Command::new("regsvr32")
-        .args(["/s", dll_path])
+        .args(["/s", &dll.to_string_lossy()])
         .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map_err(|e| format!("spawn regsvr32: {e}"))?;
@@ -480,18 +438,6 @@ fn regsvr32_register(dll_path: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("regsvr32 exit {}", status.code().unwrap_or(-1)))
-    }
-}
-
-fn install_and_register_dll() -> Result<(), String> {
-    let dll = install_engine_files()?;
-    let dll_str = dll.to_string_lossy().to_string();
-    // Prefer the DLL's own DllRegisterServer (runs RegisterAPO for correct APO
-    // metadata). Fall back to writing the registry directly if regsvr32 fails.
-    match regsvr32_register(&dll_str) {
-        Ok(()) => Ok(()),
-        Err(e) => register_apo_com(&dll_str)
-            .map_err(|de| format!("regsvr32 failed ({e}); direct registration also failed ({de})")),
     }
 }
 
