@@ -121,10 +121,15 @@ export default function App() {
       .catch(() => setDeviceLoading(false));
   }, []);
 
+  // Prompt for setup whenever the engine isn't actually registered — covers a
+  // fresh install, a failed setup, and the state after removing the engine (a
+  // saved device selection alone doesn't mean the EQ works).
   useEffect(() => {
-    invoke("is_device_configured").then((configured) => {
-      if (!configured) openDeviceSetup();
-    });
+    Promise.all([invoke("is_device_configured"), invoke("is_apo_installed")])
+      .then(([configured, registered]) => {
+        if (!configured || !registered) openDeviceSetup();
+      })
+      .catch(() => {});
   }, [openDeviceSetup]);
 
   const runEngineSetup = () => {

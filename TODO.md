@@ -36,6 +36,9 @@ Working branch: `steam-qeq` (all work here). `origin/main` untouched until it wo
 ## P2 — Polish
 - [ ] App icon / branding pass
 - [x] Persist EQ (curve, preamp, on/off, preset) across app restarts
+- [x] Debounce config writes so a drag is one write, not ~120
+- [x] Clean the old device's effect when switching devices
+- [x] Preselect the in-use device when reopening the device dialog
 - [ ] Handle default-device change while running
 
 ## P2 — Launch / CV (after it works)
