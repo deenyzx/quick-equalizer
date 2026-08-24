@@ -19,6 +19,11 @@ Working branch: `steam-qeq` (all work here). `origin/main` untouched until it wo
 - [ ] Resolve EqualizerAPO license (GPL vs LGPL). Decides whether you can sell
       closed-source, and whether the repo must be public. **Do before monetizing.**
 
+## P0 — Before release (don't ship with these)
+- [ ] `EnableTrace` is written as `"true"` in `set_config_path` (engine.rs) for
+      diagnostics — set to `"false"` before shipping so the APO stops writing a
+      log on every audio session
+
 ## P1 — Packaging & distribution
 - [ ] Download WebView2 **Fixed Version** runtime → `src-tauri/webview2-runtime/`
 - [ ] Run `scripts/build-steam.ps1` → produce `steam-depot/`

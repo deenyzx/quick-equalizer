@@ -137,6 +137,26 @@ body {
 }
 .danger-btn:disabled { opacity: 0.5; cursor: default; }
 
+.ghost-btn {
+  display: block;
+  width: 100%;
+  margin-bottom: 8px;
+  background: transparent;
+  border: 0.5px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.55);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.ghost-btn:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.ghost-btn:disabled { opacity: 0.5; cursor: default; }
+
 /* Engine setup / status report line */
 .setup-msg {
   padding: 7px 18px;

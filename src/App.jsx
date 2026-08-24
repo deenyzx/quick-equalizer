@@ -149,6 +149,18 @@ export default function App() {
       .finally(() => setSetupBusy(false));
   };
 
+  const showEngineLog = () => {
+    setSetupBusy(true);
+    setSetupMsg("Collecting engine log… approve the Windows prompt.");
+    invoke("collect_engine_logs")
+      .then((log) => {
+        setShowDeviceSetup(false);
+        setSetupMsg(log.trim() || "Engine log is empty.");
+      })
+      .catch((e) => setSetupMsg(typeof e === "string" ? e : "Could not read engine log."))
+      .finally(() => setSetupBusy(false));
+  };
+
   const removeEngine = () => {
     setSetupBusy(true);
     setSetupMsg("Removing audio engine… approve the Windows prompt.");
@@ -598,9 +610,14 @@ export default function App() {
               </div>
             )}
             {apoFound && (
-              <button className="danger-btn" onClick={removeEngine} disabled={setupBusy}>
-                Remove audio engine from this PC
-              </button>
+              <>
+                <button className="ghost-btn" onClick={showEngineLog} disabled={setupBusy}>
+                  Show engine diagnostics
+                </button>
+                <button className="danger-btn" onClick={removeEngine} disabled={setupBusy}>
+                  Remove audio engine from this PC
+                </button>
+              </>
             )}
             <div className="modal-btns">
               {apoFound && (
