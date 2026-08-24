@@ -40,6 +40,7 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_MULTI_SZ,
     REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ,
 };
+use windows::Win32::System::Registry::RegQueryValueExW;
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 // ── Values taken from EqualizerAPO's source (no RegShot needed) ─────────────
@@ -456,6 +457,54 @@ unsafe fn delete_tree(subkey: &str) {
     let _ = RegDeleteTreeW(HKEY_LOCAL_MACHINE, PCWSTR(wide(subkey).as_ptr()));
 }
 
+/// Reads a REG_SZ value, or None if the key/value is missing or unreadable.
+unsafe fn read_sz(subkey: &str, name: &str) -> Option<String> {
+    let mut hkey = HKEY::default();
+    if RegOpenKeyExW(
+        HKEY_LOCAL_MACHINE,
+        PCWSTR(wide(subkey).as_ptr()),
+        0,
+        REG_SAM_FLAGS(KEY_READ.0),
+        &mut hkey,
+    ) != ERROR_SUCCESS
+    {
+        return None;
+    }
+    let name_w = wide(name);
+    let mut size: u32 = 0;
+    let rc = RegQueryValueExW(
+        hkey,
+        PCWSTR(name_w.as_ptr()),
+        None,
+        None,
+        None,
+        Some(&mut size),
+    );
+    if rc != ERROR_SUCCESS || size == 0 {
+        let _ = RegCloseKey(hkey);
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let rc = RegQueryValueExW(
+        hkey,
+        PCWSTR(name_w.as_ptr()),
+        None,
+        None,
+        Some(buf.as_mut_ptr()),
+        Some(&mut size),
+    );
+    let _ = RegCloseKey(hkey);
+    if rc != ERROR_SUCCESS {
+        return None;
+    }
+    let units: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+    Some(String::from_utf16_lossy(&units[..end]))
+}
+
 // ── Individual setup steps ──────────────────────────────────────────────────
 
 /// Copy the whole bundled engine folder (the APO DLL + its dependency DLLs) into
@@ -573,6 +622,10 @@ fn write_fx_values(device_id: &str) -> Result<(), String> {
         // FxProperties may exist with a locked ACL; non-fatal if it doesn't yet.
         let _ = take_regkey(&fx);
 
+        // Preserve any vendor APO already on this device BEFORE we overwrite the
+        // slots, so its effects can be chained to and restored on uninstall.
+        backup_original_apos(device_key, &fx);
+
         // Remove legacy LFX/GFX entries so only the modern SFX/EFX slots apply
         // (no-op if FxProperties doesn't exist yet).
         delete_value(&fx, FX_LFX_VALUE);
@@ -598,8 +651,42 @@ fn write_fx_values(device_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Strips our effect values from a device's FxProperties, leaving any other
-/// effects on that device intact. Best-effort.
+/// Where the original (vendor) APO GUIDs are stashed so we can chain to them and
+/// put them back on uninstall — the same location the APO DLL reads at runtime.
+fn child_apo_key(device_key: &str) -> String {
+    format!("{CONFIG_PATH_KEY}\\Child APOs\\{device_key}")
+}
+
+/// Saves whatever APO GUIDs the device already had, so the vendor's effects can
+/// be chained to (rather than silently destroyed) and restored on uninstall.
+/// Only writes the backup once — re-running setup must not overwrite the
+/// originals with our own CLSIDs.
+unsafe fn backup_original_apos(device_key: &str, fx: &str) {
+    let backup = child_apo_key(device_key);
+    if read_sz(&backup, "Version").is_some() {
+        return; // already backed up
+    }
+    // Pre-mix slot was SFX (or legacy LFX); post-mix was EFX (or legacy GFX).
+    let pre = read_sz(fx, FX_SFX_VALUE).or_else(|| read_sz(fx, FX_LFX_VALUE));
+    let post = read_sz(fx, FX_EFX_VALUE).or_else(|| read_sz(fx, FX_GFX_VALUE));
+
+    let is_ours =
+        |g: &String| g.eq_ignore_ascii_case(APO_PRE_MIX_CLSID) || g.eq_ignore_ascii_case(APO_POST_MIX_CLSID);
+    let pre = pre.filter(|g| !is_ours(g)).unwrap_or_default();
+    let post = post.filter(|g| !is_ours(g)).unwrap_or_default();
+
+    if let Ok(hk) = open_or_create(&backup) {
+        let _ = set_sz(hk, "PreMixChild", &pre);
+        let _ = set_sz(hk, "PostMixChild", &post);
+        let _ = set_sz(hk, "AllowSilentBufferModification", "false");
+        let _ = set_sz(hk, "Version", "1.4.2");
+        let _ = RegCloseKey(hk);
+    }
+}
+
+/// Strips our effect values from a device's FxProperties and puts back whatever
+/// vendor APO was there before us, so removing the engine leaves the device as
+/// we found it. Best-effort.
 fn remove_fx_values(device_id: &str) {
     let key = registry_device_key(device_id);
     let render =
@@ -608,10 +695,32 @@ fn remove_fx_values(device_id: &str) {
     unsafe {
         let _ = take_regkey(&render);
         let _ = take_regkey(&fx);
-        delete_value(&fx, FX_SFX_VALUE);
-        delete_value(&fx, FX_EFX_VALUE);
-        delete_value(&fx, FX_SFX_MODES_VALUE);
-        delete_value(&fx, FX_EFX_MODES_VALUE);
+
+        let backup = child_apo_key(key);
+        let pre = read_sz(&backup, "PreMixChild").unwrap_or_default();
+        let post = read_sz(&backup, "PostMixChild").unwrap_or_default();
+
+        // Restore the original APO where there was one; otherwise just remove ours.
+        if let Ok(hk) = open_or_create(&fx) {
+            if pre.is_empty() {
+                delete_value(&fx, FX_SFX_VALUE);
+            } else {
+                let _ = set_sz(hk, FX_SFX_VALUE, &pre);
+            }
+            if post.is_empty() {
+                delete_value(&fx, FX_EFX_VALUE);
+            } else {
+                let _ = set_sz(hk, FX_EFX_VALUE, &post);
+            }
+            let _ = RegCloseKey(hk);
+        }
+        if pre.is_empty() {
+            delete_value(&fx, FX_SFX_MODES_VALUE);
+        }
+        if post.is_empty() {
+            delete_value(&fx, FX_EFX_MODES_VALUE);
+        }
+        delete_tree(&backup);
     }
 }
 
