@@ -193,11 +193,23 @@ const ENGINE_SETUP_ARG: &str = "--engine-setup";
 const ENGINE_UNINSTALL_ARG: &str = "--engine-uninstall";
 const ENGINE_COLLECT_LOGS_ARG: &str = "--engine-collect-logs";
 
+/// Reads the value passed after `flag` on the command line, e.g.
+/// `--engine-setup {0.0.0.00000000}.{guid}`.
+fn arg_after(flag: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == flag)?;
+    args.get(i + 1).cloned().filter(|s| !s.is_empty())
+}
+
 /// Entry point for the privileged setup helper — runs in an elevated copy of the
 /// app (spawned by `run_engine_setup`), registers the audio engine, then exits.
+///
+/// The device id arrives as a command-line argument rather than being read from
+/// disk: on a standard-user PC, UAC elevates using an administrator's account, so
+/// the helper cannot see the calling user's per-user files.
 fn run_engine_setup_elevated() -> i32 {
-    match read_device_info() {
-        Some((id, _name)) => engine::register_for_device(&id),
+    match arg_after(ENGINE_SETUP_ARG).or_else(|| read_device_info().map(|(id, _)| id)) {
+        Some(id) => engine::register_for_device(&id),
         None => {
             let _ = fs::write(
                 engine::log_path(),
@@ -221,12 +233,18 @@ fn read_engine_log() -> Result<String, String> {
 
 /// Relaunches the app elevated (one UAC prompt, branded as this app) with the
 /// given hidden flag, waits for it, and reports whether it succeeded.
-fn elevate_self(arg: &str) -> Result<(), String> {
+fn elevate_self(arg: &str, extra: Option<&str>) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_str = exe.to_string_lossy().replace('\'', "''");
+
+    // Each argument is single-quoted for PowerShell; embedded quotes are doubled.
+    let arg_list = match extra {
+        Some(v) => format!("'{}','{}'", arg, v.replace('\'', "''")),
+        None => format!("'{}'", arg),
+    };
 
     let status = std::process::Command::new("powershell")
         .args([
@@ -235,8 +253,8 @@ fn elevate_self(arg: &str) -> Result<(), String> {
             "Hidden",
             "-Command",
             &format!(
-                "$p = Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -PassThru -Wait; exit $p.ExitCode",
-                exe_str, arg
+                "$p = Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs -PassThru -Wait; exit $p.ExitCode",
+                exe_str, arg_list
             ),
         ])
         .creation_flags(CREATE_NO_WINDOW)
@@ -252,12 +270,14 @@ fn elevate_self(arg: &str) -> Result<(), String> {
 
 #[tauri::command]
 fn run_engine_setup() -> Result<(), String> {
-    elevate_self(ENGINE_SETUP_ARG)
+    let device = read_device_info().map(|(id, _)| id);
+    elevate_self(ENGINE_SETUP_ARG, device.as_deref())
 }
 
 #[tauri::command]
 fn uninstall_engine() -> Result<(), String> {
-    elevate_self(ENGINE_UNINSTALL_ARG)
+    let device = read_device_info().map(|(id, _)| id);
+    elevate_self(ENGINE_UNINSTALL_ARG, device.as_deref())
 }
 
 /// Copies the audio engine's own log (written from inside the Windows audio
@@ -265,7 +285,7 @@ fn uninstall_engine() -> Result<(), String> {
 /// whether the effect is actually being loaded.
 #[tauri::command]
 fn collect_engine_logs() -> Result<String, String> {
-    let _ = elevate_self(ENGINE_COLLECT_LOGS_ARG);
+    let _ = elevate_self(ENGINE_COLLECT_LOGS_ARG, None);
     let p = engine::apo_trace_copy_path();
     if p.exists() {
         fs::read_to_string(&p).map_err(|e| e.to_string())
@@ -281,7 +301,7 @@ pub fn run() {
         std::process::exit(run_engine_setup_elevated());
     }
     if std::env::args().any(|a| a == ENGINE_UNINSTALL_ARG) {
-        let id = read_device_info().map(|(id, _)| id);
+        let id = arg_after(ENGINE_UNINSTALL_ARG).or_else(|| read_device_info().map(|(id, _)| id));
         std::process::exit(engine::unregister_for_device(id.as_deref()));
     }
     if std::env::args().any(|a| a == ENGINE_COLLECT_LOGS_ARG) {
