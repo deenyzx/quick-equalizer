@@ -2,52 +2,58 @@
 
 Working branch: `steam-qeq` (all work here). `origin/main` untouched until it works.
 
-> **Immediate next action:** re-run setup — the last fix (registry path) is committed
-> but not yet tested. `pnpm tauri dev` → Set up → pick a *connected* device → Apply →
-> approve UAC → confirm every step shows **OK** → reboot → check audio is EQ'd.
+> **Immediate next action — the one thing gating everything:**
+> `git pull && pnpm tauri dev` → **Set up** → pick a *connected* device → Apply →
+> approve UAC → every step should show **OK** → **reboot** → play audio, move sliders.
+> If it doesn't work: device dialog → **Show engine diagnostics** → paste the output.
 
 ---
 
-## P0 — Make it actually work (core blocker)
-- [ ] Re-run engine setup on latest code; confirm `write device FxProperties` = OK
-- [ ] Reboot, play audio, move sliders — confirm EQ **actually affects audio**
-- [ ] If audio plays but EQ does nothing → fix `AudioProcessingObjects` metadata and/or
-      `ConfigPath` value name (both compile-verified only, not runtime-verified)
-- [ ] Verify EQ on/off toggle and preamp actually change the sound
+## P0 — Confirm it works (only you can do this)
+- [ ] Run setup on latest code; confirm every step **OK**
+- [ ] Reboot, play audio, move sliders — confirm the EQ **actually changes the sound**
+- [ ] Confirm the EQ on/off toggle and preamp change the sound
+- [ ] If no effect → **Show engine diagnostics** and share it (tells us whether the
+      APO is loaded at all vs. a config-level problem)
 
 ## P0 — Legal gate (blocks selling)
-- [ ] Resolve EqualizerAPO license (GPL vs LGPL). Decides whether you can sell
-      closed-source, and whether the repo must be public. **Do before monetizing.**
+- [ ] Resolve EqualizerAPO's license (GPL vs LGPL — sources contradict each other).
+      Decides whether you can sell closed-source and whether the repo must be public.
 
-## P0 — Before release (don't ship with these)
-- [ ] `EnableTrace` is written as `"true"` in `set_config_path` (engine.rs) for
-      diagnostics — set to `"false"` before shipping so the APO stops writing a
-      log on every audio session
+## P0 — Flip before release
+- [ ] `EnableTrace` is set to `"true"` in `set_config_path` (engine.rs) for
+      diagnostics → set to `"false"` so the engine stops logging every audio session
 
 ## P1 — Packaging & distribution
 - [ ] Download WebView2 **Fixed Version** runtime → `src-tauri/webview2-runtime/`
+      (without it the app can open to a blank window on a bare Win10 machine)
 - [ ] Run `scripts/build-steam.ps1` → produce `steam-depot/`
-- [ ] Test the depot build on a **clean machine/VM** (no dev tools) — confirm it launches
-      (WebView2) and completes engine setup
-- [ ] Code-signing certificate (SmartScreen / Smart App Control warnings on end-user PCs)
+- [ ] Test the depot on a **clean machine/VM** (no dev tools): launches + setup completes
+- [ ] Code-signing certificate (SmartScreen / Smart App Control warn on unsigned apps)
+- [ ] Steam app id + depot + launch option
 
-## P1 — Robustness
-- [x] "Restart required" prompt in the UI after successful setup
-- [x] Graceful error UX when setup fails (surface the log to the user)
-- [x] Uninstall / cleanup path — remove APO registration + installed files (issue #6)
-      *(compile-verified; test after install is confirmed)*
+## P1 — Robustness (test once setup is confirmed)
+- [ ] Verify uninstall restores the device (incl. a device that had a vendor APO)
 - [ ] Test on a second device type (Bluetooth vs onboard/USB)
+- [ ] Test as a **standard (non-admin) user** — the elevation path differs there
+- [x] "Restart required" prompt after setup
+- [x] Surface setup failures in the UI
+- [x] Uninstall / cleanup path (issue #6)
+- [x] Preserve + restore the device's original vendor APO
+- [x] Machine-wide state so setup works when UAC elevates as another account
+- [x] Merge ACLs instead of replacing (was locking the audio service out)
 
 ## P2 — Polish
 - [ ] App icon / branding pass
-- [x] Persist EQ (curve, preamp, on/off, preset) across app restarts
-- [x] Debounce config writes so a drag is one write, not ~120
-- [x] Clean the old device's effect when switching devices
-- [x] Preselect the in-use device when reopening the device dialog
 - [ ] Handle default-device change while running
+- [x] Clipping protection (auto headroom for boosted bands)
+- [x] Persist EQ across restarts
+- [x] Debounce config writes
+- [x] Clean the old device's effect when switching devices
+- [x] Preselect the in-use device in the device dialog
 
 ## P2 — Launch / CV (after it works)
-- [ ] Screenshots + short demo GIF (in README + portfolio)
-- [ ] Decide repo visibility + business model (see license outcome)
-- [ ] Steam store page (if selling)
+- [ ] Screenshots + short demo GIF (README + portfolio)
+- [ ] Decide repo visibility + business model (follows the license outcome)
+- [ ] Steam store page
 - [ ] Publish `steam-qeq` → `main` once verified working
