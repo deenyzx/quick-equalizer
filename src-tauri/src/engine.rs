@@ -532,9 +532,12 @@ unsafe fn read_sz(subkey: &str, name: &str) -> Option<String> {
 /// path and resolves its dependencies from that same directory.
 fn install_engine_files() -> Result<PathBuf, String> {
     let src_dir = bundled_engine_dir().ok_or_else(|| {
-        "bundled engine folder not found (expected engine/ next to the exe, or \
-         src-tauri/engine-bundle/ in dev)"
-            .to_string()
+        // Name the paths actually checked — otherwise "not found" gives no clue
+        // which exe was launched or where its engine folder was expected.
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<unknown>".into());
+        format!("bundled engine folder not found. exe: {exe} — looked for 'engine' beside it, then '../../engine-bundle'")
     })?;
     let dst_dir = engine_install_dir();
     fs::create_dir_all(&dst_dir).map_err(|e| format!("create install dir: {e}"))?;
