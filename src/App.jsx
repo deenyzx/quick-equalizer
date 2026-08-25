@@ -180,14 +180,21 @@ export default function App() {
   const confirmDevice = () => {
     if (!selectedDevice) return;
     setDeviceError("");
-    invoke("configure_device", {
-      deviceId: selectedDevice.id,
-      deviceName: selectedDevice.name,
-    })
+    const dev = selectedDevice;
+    invoke("configure_device", { deviceId: dev.id, deviceName: dev.name })
       .then(() => {
-        setActiveDevice(selectedDevice.name);
+        setActiveDevice(dev.name);
+        return invoke("is_engine_active_for", { deviceId: dev.id }).catch(() => false);
+      })
+      .then((alreadyActive) => {
         setShowDeviceSetup(false);
-        runEngineSetup();
+        if (alreadyActive) {
+          // Nothing changed for this device — no re-install, no reboot prompt.
+          setApoFound(true);
+          setSetupMsg("This device is already set up.");
+        } else {
+          runEngineSetup();
+        }
       })
       .catch((e) => {
         console.error("Failed to configure device:", e);
@@ -520,7 +527,18 @@ export default function App() {
         </button>
       </div>
 
-      {setupMsg && <div className="setup-msg">{setupMsg}</div>}
+      {setupMsg && (
+        <div className="setup-msg">
+          <button
+            className="setup-msg-close"
+            onClick={() => setSetupMsg("")}
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+          <span className="setup-msg-body">{setupMsg}</span>
+        </div>
+      )}
 
       <div className="preset-row">
         {Object.entries(allPresets).map(([key, preset]) => (
@@ -627,9 +645,12 @@ export default function App() {
             )}
             {apoFound && (
               <>
-                <button className="ghost-btn" onClick={showEngineLog} disabled={setupBusy}>
-                  Show engine diagnostics
-                </button>
+                {/* Diagnostics are a dev tool — excluded from release builds. */}
+                {import.meta.env.DEV && (
+                  <button className="ghost-btn" onClick={showEngineLog} disabled={setupBusy}>
+                    Show engine diagnostics
+                  </button>
+                )}
                 <button className="danger-btn" onClick={removeEngine} disabled={setupBusy}>
                   Remove audio engine from this PC
                 </button>

@@ -74,6 +74,13 @@ fn is_apo_installed() -> bool {
     engine::is_registered()
 }
 
+/// Whether the engine is already registered on this device (so the UI can skip a
+/// redundant setup + reboot prompt).
+#[tauri::command]
+fn is_engine_active_for(device_id: String) -> bool {
+    engine::is_active_for(&device_id)
+}
+
 #[tauri::command]
 fn is_device_configured() -> bool {
     get_device_info_path().exists()
@@ -342,6 +349,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             write_eq_config,
             is_apo_installed,
+            is_engine_active_for,
             is_device_configured,
             get_configured_device,
             get_default_device_name,

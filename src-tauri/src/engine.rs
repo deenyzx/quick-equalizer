@@ -798,6 +798,15 @@ fn previously_registered_device() -> Option<String> {
         .filter(|s| !s.is_empty() && s != "1")
 }
 
+/// True if the engine is already registered on this exact device — used to skip a
+/// redundant (re)install and the "restart your PC" prompt when nothing changed.
+pub fn is_active_for(device_id: &str) -> bool {
+    is_registered()
+        && previously_registered_device()
+            .map(|reg| registry_device_key(&reg) == registry_device_key(device_id))
+            .unwrap_or(false)
+}
+
 // ── Orchestration (called by the elevated helper) ───────────────────────────
 
 /// Runs every setup step for `device_id`, writing a detailed report to the log.
