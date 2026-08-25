@@ -82,7 +82,7 @@ fn engine_install_dir() -> PathBuf {
 /// User-writable config dir (the unelevated app writes config.txt here on every
 /// EQ change, and the APO running in audiodg must be able to read it).
 fn engine_config_dir() -> PathBuf {
-    PathBuf::from(r"C:\ProgramData\QuickEqualizer\config")
+    state_dir().join("config")
 }
 
 /// Path the unelevated side writes EQ filters to. Public so lib.rs can use it.
@@ -90,20 +90,22 @@ pub fn config_txt_path() -> PathBuf {
     engine_config_dir().join("config.txt")
 }
 
-fn marker_path() -> PathBuf {
-    let mut p = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push("QuickEqualizer");
+/// Machine-wide state. Deliberately NOT under %APPDATA%: the elevated helper can
+/// run as a *different* account (on a standard-user PC, UAC elevates using an
+/// admin's credentials), so per-user paths would have the helper writing state
+/// the app can never read — leaving setup looking permanently undone.
+fn state_dir() -> PathBuf {
+    let p = PathBuf::from(r"C:\ProgramData\QuickEqualizer");
     let _ = fs::create_dir_all(&p);
-    p.push("engine_registered");
     p
 }
 
+fn marker_path() -> PathBuf {
+    state_dir().join("engine_registered")
+}
+
 pub fn log_path() -> PathBuf {
-    let mut p = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push("QuickEqualizer");
-    let _ = fs::create_dir_all(&p);
-    p.push("engine_setup.log");
-    p
+    state_dir().join("engine_setup.log")
 }
 
 /// Best-effort check that our engine is registered. Hardened later by reading
@@ -573,11 +575,13 @@ fn set_config_path() -> Result<(), String> {
     let cfg = engine_config_dir();
     fs::create_dir_all(&cfg).map_err(|e| format!("create config dir: {e}"))?;
 
-    // Let the unelevated app write config.txt here at runtime.
+    // Let the unelevated app write config.txt and read the state/logs the
+    // elevated helper leaves behind. Granted on the whole state dir (which the
+    // config dir lives under) so it inherits down.
     const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
     unsafe {
         grant_full_access(
-            &cfg.to_string_lossy(),
+            &state_dir().to_string_lossy(),
             SE_FILE_OBJECT,
             WinBuiltinUsersSid,
             FILE_ALL_ACCESS,
@@ -617,11 +621,7 @@ fn apo_log_candidates() -> Vec<PathBuf> {
 
 /// Where we copy the APO log so the unelevated app can read it.
 pub fn apo_trace_copy_path() -> PathBuf {
-    let mut p = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push("QuickEqualizer");
-    let _ = fs::create_dir_all(&p);
-    p.push("apo_trace.log");
-    p
+    state_dir().join("apo_trace.log")
 }
 
 /// Elevated: copy the APO's own log somewhere the app can read it. Returns an
