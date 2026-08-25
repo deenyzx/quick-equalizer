@@ -505,12 +505,14 @@ export default function App() {
       <div className="device-bar">
         <div className="device-status">
           <div className={`device-pip ${apoFound ? "pip-on" : "pip-off"}`} />
-          <span className="device-text">Active device</span>
+          {/* The label must reflect state: saying "Active device" while the
+              engine isn't registered reads as though the EQ is working. */}
+          <span className="device-text">{apoFound ? "Active device" : "Output device"}</span>
           <span className="device-name">{activeDevice}</span>
           {apoFound ? (
-            <span className="apo-badge">Active</span>
+            <span className="apo-badge">EQ active</span>
           ) : (
-            <span className="apo-badge apo-badge-off">Setup needed</span>
+            <span className="apo-badge apo-badge-off">Not active — setup needed</span>
           )}
         </div>
         <button className="change-device-btn" onClick={openDeviceSetup}>
