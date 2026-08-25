@@ -393,6 +393,13 @@ body {
   font-weight: 500;
 }
 
+.preamp-auto {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.35);
+  white-space: nowrap;
+  cursor: help;
+}
+
 .reset-btn {
   background: rgba(255,255,255,0.06);
   border: 0.5px solid rgba(255,255,255,0.18);
