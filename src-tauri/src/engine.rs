@@ -459,6 +459,24 @@ unsafe fn delete_tree(subkey: &str) {
     let _ = RegDeleteTreeW(HKEY_LOCAL_MACHINE, PCWSTR(wide(subkey).as_ptr()));
 }
 
+/// True if an HKLM subkey exists (and we can open it for reading).
+unsafe fn key_exists(subkey: &str) -> bool {
+    let mut hkey = HKEY::default();
+    if RegOpenKeyExW(
+        HKEY_LOCAL_MACHINE,
+        PCWSTR(wide(subkey).as_ptr()),
+        0,
+        REG_SAM_FLAGS(KEY_READ.0),
+        &mut hkey,
+    ) == ERROR_SUCCESS
+    {
+        let _ = RegCloseKey(hkey);
+        true
+    } else {
+        false
+    }
+}
+
 /// Reads a REG_SZ value, or None if the key/value is missing or unreadable.
 unsafe fn read_sz(subkey: &str, name: &str) -> Option<String> {
     let mut hkey = HKEY::default();
@@ -738,34 +756,34 @@ fn remove_fx_values(device_id: &str) {
         format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{key}");
     let fx = format!("{render}\\FxProperties");
     unsafe {
-        let _ = take_regkey(&render);
-        let _ = take_regkey(&fx);
-
         let backup = child_apo_key(key);
         let pre = read_sz(&backup, "PreMixChild").unwrap_or_default();
         let post = read_sz(&backup, "PostMixChild").unwrap_or_default();
+        delete_tree(&backup);
+
+        // Nothing of ours can be on a device whose FxProperties never existed —
+        // don't create the key just to clean it.
+        if !key_exists(&fx) {
+            return;
+        }
+        let _ = take_regkey(&render);
+        let _ = take_regkey(&fx);
 
         // Restore the original APO where there was one; otherwise just remove ours.
-        if let Ok(hk) = open_or_create(&fx) {
-            if pre.is_empty() {
-                delete_value(&fx, FX_SFX_VALUE);
-            } else {
-                let _ = set_sz(hk, FX_SFX_VALUE, &pre);
-            }
-            if post.is_empty() {
-                delete_value(&fx, FX_EFX_VALUE);
-            } else {
-                let _ = set_sz(hk, FX_EFX_VALUE, &post);
-            }
+        if pre.is_empty() {
+            delete_value(&fx, FX_SFX_VALUE);
+            delete_value(&fx, FX_SFX_MODES_VALUE);
+        } else if let Ok(hk) = open_or_create(&fx) {
+            let _ = set_sz(hk, FX_SFX_VALUE, &pre);
             let _ = RegCloseKey(hk);
         }
-        if pre.is_empty() {
-            delete_value(&fx, FX_SFX_MODES_VALUE);
-        }
         if post.is_empty() {
+            delete_value(&fx, FX_EFX_VALUE);
             delete_value(&fx, FX_EFX_MODES_VALUE);
+        } else if let Ok(hk) = open_or_create(&fx) {
+            let _ = set_sz(hk, FX_EFX_VALUE, &post);
+            let _ = RegCloseKey(hk);
         }
-        delete_tree(&backup);
     }
 }
 

@@ -26,6 +26,9 @@ const ACCENT2 = "#f07820";
 // that releasing the mouse feels instant.
 const EQ_WRITE_DEBOUNCE_MS = 120;
 
+/// dB of automatic attenuation needed so the largest band boost can't clip.
+const headroom = (vals) => Math.max(0, ...vals);
+
 // Canvas layout constants
 const PAD_LEFT = 50;
 const PAD_RIGHT = 50;
@@ -240,7 +243,10 @@ export default function App() {
       if (!eqOn) {
         config = "Preamp: 0 dB\n";
       } else {
-        const lines = [`Preamp: ${preamp >= 0 ? "+" : ""}${preamp.toFixed(1)} dB`];
+        // Boosting bands without matching headroom clips the signal (audible as
+        // crackling/distortion), so subtract the largest boost from the preamp.
+        const total = preamp - headroom(vals);
+        const lines = [`Preamp: ${total >= 0 ? "+" : ""}${total.toFixed(1)} dB`];
         vals.forEach((gain, i) => {
           lines.push(`Filter ${i + 1}: ON PK Fc ${BANDS[i]} Hz Gain ${gain >= 0 ? "+" : ""}${gain.toFixed(1)} dB Q 1.41`);
         });
@@ -557,6 +563,14 @@ export default function App() {
             onChange={(e) => setPreamp(parseFloat(e.target.value))}
           />
           <span className="preamp-val">{(preamp >= 0 ? "+" : "") + preamp.toFixed(1)} dB</span>
+          {eqOn && headroom(vals) > 0 && (
+            <span
+              className="preamp-auto"
+              title="Automatic attenuation so boosted bands don't clip"
+            >
+              auto −{headroom(vals).toFixed(1)}
+            </span>
+          )}
         </div>
         <button className="reset-btn" onClick={reset}>Reset</button>
       </div>
